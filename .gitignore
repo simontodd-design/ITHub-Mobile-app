@@ -1,0 +1,17 @@
+node_modules/
+.expo/
+dist/
+web-build/
+expo-env.d.ts
+ios/
+android/
+*.apk
+*.aab
+*.ipa
+.env
+.env.local
+google-services.json
+GoogleService-Info.plist
+*.jks
+*.keystore
+credentials.json
