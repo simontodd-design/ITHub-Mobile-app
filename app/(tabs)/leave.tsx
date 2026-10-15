@@ -8,7 +8,21 @@ import { colors } from '@/theme';
 import { font } from '@/theme';
 import { BrandHeader, Button, Card, Meta, Notice, Pill, Screen } from '@/ui';
 
-type Leave = { id: number; starts_on: string; ends_on: string; reason: string | null; status: string };
+type LeaveKind = 'holiday' | 'sick';
+
+type Leave = { id: number; starts_on: string; ends_on: string; reason: string | null; status: string; kind?: LeaveKind | 'off' };
+
+function kindLabel(kind: Leave['kind']): string {
+  if (kind === 'sick') {
+    return 'Sick';
+  }
+
+  if (kind === 'off') {
+    return 'Off';
+  }
+
+  return 'Holiday';
+}
 
 function daysBetween(start: string, end: string): number {
   const from = new Date(`${start}T00:00:00`);
@@ -33,6 +47,7 @@ export default function LeaveScreen() {
   const [starts, setStarts] = useState(new Date());
   const [ends, setEnds] = useState(new Date());
   const [picking, setPicking] = useState<'start' | 'end' | null>(null);
+  const [kind, setKind] = useState<LeaveKind>('holiday');
   const [reason, setReason] = useState('');
   const [message, setMessage] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
@@ -57,10 +72,10 @@ export default function LeaveScreen() {
     try {
       await api('/mobile/leave', {
         method: 'POST',
-        body: { starts_on: ymd(starts), ends_on: ymd(ends < starts ? starts : ends), reason },
+        body: { starts_on: ymd(starts), ends_on: ymd(ends < starts ? starts : ends), reason, kind },
       });
       setReason('');
-      setMessage('Request sent. The office approves it onto the schedule.');
+      setMessage(kind === 'sick' ? 'Sick day recorded. The office can see it on the schedule.' : 'Holiday requested. The office approves it onto the schedule.');
       await load();
     } catch (err) {
       setMessage(err instanceof Error ? err.message : 'Request failed.');
@@ -76,9 +91,20 @@ export default function LeaveScreen() {
           <Text style={styles.label}>Remaining this year</Text>
           <Text style={styles.days}>{remaining ?? '…'}</Text>
         </View>
-        <Meta>{allowance ?? '…'} days in the year. Approved weekdays come off that balance.</Meta>
+        <Meta>
+          {kind === 'sick'
+            ? 'Sick days are recorded straight away and do not come off this balance.'
+            : `${allowance ?? '…'} holiday days in the year. Approved weekdays come off that balance.`}
+        </Meta>
       </Card>
-      <Meta>Requests go to the office. Approved days are blocked on the schedule.</Meta>
+      <View style={styles.kinds}>
+        <Pressable onPress={() => setKind('holiday')} style={[styles.kind, kind === 'holiday' ? styles.kindOn : null]}>
+          <Text style={kind === 'holiday' ? styles.kindOnText : styles.kindText}>Holiday</Text>
+        </Pressable>
+        <Pressable onPress={() => setKind('sick')} style={[styles.kind, kind === 'sick' ? styles.kindOn : null]}>
+          <Text style={kind === 'sick' ? styles.kindOnText : styles.kindText}>Sick</Text>
+        </Pressable>
+      </View>
       <Card>
         <Pressable onPress={() => setPicking('start')} style={styles.date}>
           <Text style={styles.label}>From</Text>
@@ -95,7 +121,7 @@ export default function LeaveScreen() {
           style={styles.input}
           value={reason}
         />
-        <Button disabled={busy} label={busy ? 'Sending…' : 'Request leave'} onPress={submit} />
+        <Button disabled={busy} label={busy ? 'Sending…' : kind === 'sick' ? 'Record sick day' : 'Request holiday'} onPress={submit} />
       </Card>
       {picking ? (
         <DateTimePicker
@@ -130,6 +156,8 @@ export default function LeaveScreen() {
                 {prettyDate(row.starts_on)} → {prettyDate(row.ends_on)}
               </Text>
               <Meta>
+                {kindLabel(row.kind)}
+                {' · '}
                 {daysBetween(row.starts_on, row.ends_on)} weekday{daysBetween(row.starts_on, row.ends_on) === 1 ? '' : 's'}
                 {row.reason ? ` · ${row.reason}` : ''}
               </Meta>
@@ -156,6 +184,11 @@ const styles = StyleSheet.create({
     padding: 12,
     color: colors.ink,
   },
+  kinds: { flexDirection: 'row', gap: 8 },
+  kind: { flex: 1, alignItems: 'center', paddingVertical: 10, borderRadius: 12, backgroundColor: colors.card, borderWidth: 1, borderColor: colors.line },
+  kindOn: { backgroundColor: colors.accent, borderColor: colors.accent },
+  kindText: { color: colors.ink, fontFamily: font.bold },
+  kindOnText: { color: '#fff', fontFamily: font.bold },
   row: { flexDirection: 'row', alignItems: 'center', gap: 8 },
   flex: { flex: 1 },
 });

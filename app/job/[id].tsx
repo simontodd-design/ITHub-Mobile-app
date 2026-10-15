@@ -1,58 +1,78 @@
+import { Ionicons } from '@expo/vector-icons';
 import { CameraView, useCameraPermissions } from 'expo-camera';
 import * as ImagePicker from 'expo-image-picker';
-import { useLocalSearchParams, useRouter } from 'expo-router';
-import { useCallback, useEffect, useRef, useState } from 'react';
-import { Linking, Pressable, StyleSheet, Text, TextInput, View } from 'react-native';
-import SignatureScreen from 'react-native-signature-canvas';
+import { useFocusEffect, useLocalSearchParams, useRouter } from 'expo-router';
+import { useCallback, useRef, useState } from 'react';
+import { FlatList, KeyboardAvoidingView, Linking, Platform, Pressable, StyleSheet, Text, TextInput, View } from 'react-native';
 import { api } from '@/api';
-import { ago, elapsed, formatSeconds, mapsUrl } from '@/format';
+import { callablePhone, chatWhen, mapsUrl } from '@/format';
 import { clientId, enqueue } from '@/offline';
-import { colors } from '@/theme';
 import { NoteBody } from '@/Post';
-import { font } from '@/theme';
-import { BrandHeader, Button, Card, Meta, Notice, Pill, Screen, useNow } from '@/ui';
+import { splitNote } from '@/noteBody';
+import { colors, font } from '@/theme';
+import { BrandHeader, Button, Meta, Notice, Pill, Screen } from '@/ui';
+
+type Note = { id: number; body: string; created_at: string | null; type: string; author?: string | null };
+
+type Part = {
+  id: number;
+  name: string | null;
+  quantity: number;
+  held?: boolean;
+  serial?: string | null;
+  location?: string | null;
+};
 
 type Job = {
   id: number;
   subject: string;
   description: string | null;
-  priority: string | number | null;
   is_fast_tracked: boolean;
   status: string | null;
   customer: { name: string } | null;
   account_hold: { reason: string | null } | null;
   phone: string | null;
   site: { name: string; address: string; latitude: string | null; longitude: string | null } | null;
-  timer: { running: boolean; started_at: string | null; elapsed_seconds: number };
-  notes: { id: number; body: string; created_at: string | null; type: string; author?: string | null }[];
-  signature: { signer_name: string; signed_at: string } | null;
-  visit_id: number | null;
+  notes: Note[];
+};
+
+type ThreadItem = {
+  key: string;
+  body: string;
+  who: string;
+  when: string;
+  staff: boolean;
+  system: boolean;
+  showWho: boolean;
 };
 
 export default function JobScreen() {
   const router = useRouter();
   const { id } = useLocalSearchParams<{ id: string }>();
   const [job, setJob] = useState<Job | null>(null);
-  const [note, setNote] = useState('');
-  const [signer, setSigner] = useState('');
+  const [parts, setParts] = useState<Part[]>([]);
+  const [draft, setDraft] = useState('');
   const [message, setMessage] = useState<string | null>(null);
-  const [signing, setSigning] = useState(false);
   const [photoOpen, setPhotoOpen] = useState(false);
+  const [sending, setSending] = useState(false);
   const cameraRef = useRef<CameraView>(null);
   const [cameraPermission, requestCameraPermission] = useCameraPermissions();
-  const [noteOpen, setNoteOpen] = useState(false);
-  const [signOpen, setSignOpen] = useState(false);
-  const [postsOpen, setPostsOpen] = useState(false);
-  const [busy, setBusy] = useState(false);
-  const now = useNow(Boolean(job?.timer.running));
+  const listRef = useRef<FlatList<ThreadItem>>(null);
 
   const load = useCallback(async () => {
-    setJob(await api<Job>(`/mobile/tickets/${id}`));
+    const [next, basket] = await Promise.all([
+      api<Job>(`/mobile/tickets/${id}`),
+      api<{ lines: Part[] }>(`/mobile/tickets/${id}/basket`).catch(() => ({ lines: [] })),
+    ]);
+    setJob(next);
+    setParts(basket.lines);
   }, [id]);
 
-  useEffect(() => {
-    load().catch((err: Error) => setMessage(err.message));
-  }, [load]);
+  useFocusEffect(
+    useCallback(() => {
+      load().catch((err: Error) => setMessage(err.message));
+    }, [load]),
+  );
 
   async function refresh() {
     try {
@@ -62,49 +82,25 @@ export default function JobScreen() {
     }
   }
 
-  async function timer() {
-    if (!job) {
+  async function send() {
+    const body = draft.trim();
+
+    if (!body || sending) {
       return;
     }
 
-    setBusy(true);
+    setSending(true);
     setMessage(null);
 
     try {
-      if (job.timer.running) {
-        try {
-          await api(`/mobile/tickets/${id}/timer/stop`, { method: 'POST' });
-          setMessage('Time is on the timesheet.');
-        } catch {
-          await enqueue({ client_id: clientId('timer'), type: 'timer_stop', ticket_id: Number(id) });
-          setMessage('Timer stop is queued until you have a signal.');
-        }
-      } else {
-        await api(`/mobile/tickets/${id}/timer/start`, { method: 'POST' });
-      }
-
-      await refresh();
-    } catch (err) {
-      setMessage(err instanceof Error ? err.message : 'Timer failed.');
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  async function saveNote() {
-    if (!note.trim()) {
-      return;
-    }
-
-    try {
-      await api(`/mobile/tickets/${id}/notes`, { method: 'POST', body: { body: note } });
-      setMessage('Note sent to the office.');
+      await api(`/mobile/tickets/${id}/notes`, { method: 'POST', body: { body } });
     } catch {
-      await enqueue({ client_id: clientId('note'), type: 'note', ticket_id: Number(id), body: note });
-      setMessage('Note is queued until you have a signal.');
+      await enqueue({ client_id: clientId('note'), type: 'note', ticket_id: Number(id), body });
+      setMessage('Message is queued until you have a signal.');
     }
 
-    setNote('');
+    setDraft('');
+    setSending(false);
     await refresh();
   }
 
@@ -118,7 +114,7 @@ export default function JobScreen() {
 
     await api(`/mobile/tickets/${id}/photos`, { method: 'POST', form });
     setPhotoOpen(false);
-    setMessage('Photo attached to the job.');
+    setMessage('Photo added to the thread.');
     await refresh();
   }
 
@@ -155,44 +151,10 @@ export default function JobScreen() {
     }
   }
 
-  async function onSign(image: string) {
-    const raw = image.replace(/^data:image\/png;base64,/, '');
-
-    try {
-      await api(`/mobile/tickets/${id}/sign-off`, {
-        method: 'POST',
-        body: { signer_name: signer || 'Customer', image: raw },
-      });
-      setMessage('Sign-off saved.');
-    } catch {
-      await enqueue({
-        client_id: clientId('sign'),
-        type: 'signature',
-        ticket_id: Number(id),
-        signer_name: signer || 'Customer',
-        image: raw,
-      });
-      setMessage('Sign-off is queued until you have a signal.');
-    }
-
-    setSigning(false);
-    await refresh();
-  }
-
-  function noteLabel(type: string): string {
-    if (type === 'private') {
-      return 'Private';
-    }
-
-    if (type === 'system') {
-      return 'System';
-    }
-
-    return 'Customer';
-  }
-
   const directions = mapsUrl(job?.site);
-  const timerLabel = job?.timer.running ? elapsed(job.timer.started_at, now) : formatSeconds(job?.timer.elapsed_seconds ?? 0);
+  const phone = callablePhone(job?.phone);
+  const waiting = parts.filter((part) => part.held !== false).length;
+  const thread = threadItems(job);
 
   if (!job) {
     return (
@@ -207,173 +169,245 @@ export default function JobScreen() {
 
   return (
     <Screen
-      onRefresh={refresh}
+      scroll={false}
       header={
         <BrandHeader eyebrow={job.customer?.name ?? 'Job'} title={job.subject}>
+          {phone ? (
+            <Pressable
+              accessibilityLabel={`Call ${phone}`}
+              hitSlop={8}
+              onPress={() => Linking.openURL(`tel:${phone}`)}
+              style={styles.call}
+            >
+              <Ionicons color="#fff" name="call" size={18} />
+            </Pressable>
+          ) : null}
           <Pressable hitSlop={8} onPress={() => router.back()}>
             <Text style={styles.back}>Back</Text>
           </Pressable>
         </BrandHeader>
       }
     >
-      <View style={styles.summary}>
-        {job.account_hold ? (
-          <Notice>
-            Account on hold. Support cannot work this job
-            {job.account_hold.reason ? ` · ${job.account_hold.reason}` : ''}.
-          </Notice>
-        ) : null}
-        <View style={styles.row}>
-          <Text style={styles.summaryMeta}>
-            {job.status ?? 'Open'}
-            {job.site?.name ? ` · ${job.site.name}` : ''}
-          </Text>
-          {job.is_fast_tracked ? <Pill label="Fast Track" tone="accent" /> : null}
-        </View>
-        <View style={styles.links}>
-          {job.phone ? (
-            <Pressable onPress={() => Linking.openURL(`tel:${job.phone}`)}>
-              <Text style={styles.link}>{job.phone}</Text>
-            </Pressable>
+      <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : undefined} style={styles.column}>
+        <View style={styles.summary}>
+          {job.account_hold ? (
+            <Notice>
+              Account on hold. Support cannot work this job
+              {job.account_hold.reason ? ` · ${job.account_hold.reason}` : ''}.
+            </Notice>
           ) : null}
+          <View style={styles.row}>
+            <Text style={styles.summaryMeta}>
+              {job.status ?? 'Open'}
+              {job.site?.name ? ` · ${job.site.name}` : ''}
+            </Text>
+            {job.is_fast_tracked ? <Pill label="Fast Track" tone="accent" /> : null}
+          </View>
           {directions ? (
-            <Pressable onPress={() => Linking.openURL(directions)}>
-              <Text style={styles.link}>Directions</Text>
-            </Pressable>
+            <View style={styles.links}>
+              <Pressable onPress={() => Linking.openURL(directions)}>
+                <Text style={styles.link}>Directions</Text>
+              </Pressable>
+            </View>
           ) : null}
+          <Pressable onPress={() => router.push(`/scan?ticket=${id}`)} style={styles.parts}>
+            <View style={styles.row}>
+              <Text style={styles.partsTitle}>{waiting ? `${waiting} to scan` : parts.length ? 'Parts on this job' : 'Parts'}</Text>
+              <Text style={styles.partsLink}>Scan</Text>
+            </View>
+            {parts.length === 0 ? <Text style={styles.partEmpty}>Nothing held yet. Scan a part onto this job.</Text> : null}
+            {parts.slice(0, 3).map((part) => (
+              <Text key={part.id} numberOfLines={1} style={styles.partLine}>
+                {part.held === false ? 'On the job · ' : ''}
+                {part.quantity > 1 ? `${part.quantity} × ` : ''}
+                {part.name || 'Part'}
+                {part.location ? ` · ${part.location}` : ''}
+              </Text>
+            ))}
+            {parts.length > 3 ? <Text style={styles.partMore}>{parts.length - 3} more</Text> : null}
+          </Pressable>
+          {message ? <Notice>{message}</Notice> : null}
         </View>
-        <Button disabled={busy || Boolean(job.account_hold)} label={job.timer.running ? `Stop timer ${timerLabel}` : 'Start timer'} onPress={timer} tone={job.timer.running ? 'danger' : 'accent'} />
-      </View>
+        <FlatList
+          ref={listRef}
+          inverted
+          style={styles.list}
+          data={[...thread].reverse()}
+          keyExtractor={(item) => item.key}
+          contentContainerStyle={styles.thread}
+          ListEmptyComponent={<Meta>No messages yet. Anything you send stays with staff.</Meta>}
+          renderItem={({ item }) => {
+            if (item.system) {
+              return <Text style={styles.system}>{item.body}</Text>;
+            }
 
-      <View style={styles.tools}>
-        <Pressable onPress={() => setPhotoOpen((open) => !open)} style={[styles.tool, photoOpen ? styles.toolOn : null]}>
-          <Text style={styles.toolText}>Photo</Text>
-        </Pressable>
-        <Pressable onPress={() => router.push(`/scan?ticket=${id}`)} style={styles.tool}>
-          <Text style={styles.toolText}>Parts</Text>
-        </Pressable>
-        <Pressable onPress={() => setNoteOpen((open) => !open)} style={styles.tool}>
-          <Text style={styles.toolText}>Note</Text>
-        </Pressable>
-        <Pressable
-          onPress={() => {
-            setSignOpen((open) => !open);
-            setSigning(false);
+            return (
+              <View style={[styles.bubble, item.staff ? styles.staff : styles.customer]}>
+                {item.showWho ? <Text style={styles.who}>{item.who}</Text> : null}
+                <NoteBody body={item.body} />
+                {item.when ? <Text style={styles.when}>{item.when}</Text> : null}
+              </View>
+            );
           }}
-          style={styles.tool}
-        >
-          <Text style={styles.toolText}>{job.signature ? 'Signed' : 'Sign'}</Text>
-        </Pressable>
-      </View>
-
-      {photoOpen ? (
-        <View style={styles.panel}>
-          {cameraPermission?.granted ? (
-            <CameraView ref={cameraRef} style={styles.camera} />
-          ) : (
-            <Pressable onPress={requestCameraPermission} style={styles.camera}>
-              <Text style={styles.cameraText}>Allow the camera to photograph this job</Text>
-            </Pressable>
-          )}
-          <Button disabled={!cameraPermission?.granted} label="Capture" onPress={capture} />
-          <Button label="Choose from library" onPress={chooseLibrary} tone="ink" />
-        </View>
-      ) : null}
-
-      {message ? <Notice>{message}</Notice> : null}
-
-      {noteOpen ? (
-        <View style={styles.panel}>
+        />
+        {photoOpen ? (
+          <View style={styles.panel}>
+            {cameraPermission?.granted ? (
+              <CameraView ref={cameraRef} style={styles.camera} />
+            ) : (
+              <Pressable onPress={requestCameraPermission} style={styles.camera}>
+                <Text style={styles.cameraText}>Allow the camera to photograph this job</Text>
+              </Pressable>
+            )}
+            <View style={styles.row}>
+              <View style={styles.flex}>
+                <Button disabled={!cameraPermission?.granted} label="Capture" onPress={capture} />
+              </View>
+              <View style={styles.flex}>
+                <Button label="Library" onPress={chooseLibrary} tone="ink" />
+              </View>
+            </View>
+          </View>
+        ) : null}
+        <View style={styles.composer}>
+          <Pressable hitSlop={8} onPress={() => setPhotoOpen((open) => !open)} style={styles.cameraButton}>
+            <Ionicons color={photoOpen ? colors.greenDark : colors.muted} name={photoOpen ? 'close' : 'camera-outline'} size={22} />
+          </Pressable>
           <TextInput
             multiline
-            onChangeText={setNote}
-            placeholder="What you did, what is left"
+            onChangeText={setDraft}
+            placeholder="Message"
             placeholderTextColor={colors.muted}
             style={styles.input}
-            value={note}
+            value={draft}
           />
-          <Button label="Save note" onPress={saveNote} tone="ink" />
+          <Pressable disabled={sending || !draft.trim()} onPress={send} style={[styles.send, !draft.trim() ? styles.sendOff : null]}>
+            <Ionicons color="#fff" name="send" size={16} />
+          </Pressable>
         </View>
-      ) : null}
-
-      {signOpen ? (
-        <View style={styles.panel}>
-          {job.signature ? <Meta>Signed by {job.signature.signer_name} · {ago(job.signature.signed_at)}</Meta> : null}
-          <TextInput
-            onChangeText={setSigner}
-            placeholder="Name of person signing"
-            placeholderTextColor={colors.muted}
-            style={styles.input}
-            value={signer}
-          />
-          {signing ? (
-            <View style={styles.padSign}>
-              <SignatureScreen descriptionText="Sign" onEmpty={() => setSigning(false)} onOK={onSign} />
-            </View>
-          ) : (
-            <Button label="Sign" onPress={() => setSigning(true)} />
-          )}
-        </View>
-      ) : null}
-
-      {job.description ? (
-        <View style={styles.panel}>
-          <Text style={styles.kicker}>Request</Text>
-          <NoteBody body={job.description} />
-        </View>
-      ) : null}
-
-      <Text style={styles.kicker}>Progress</Text>
-      {job.notes.length === 0 ? <Meta>No posts yet.</Meta> : null}
-      {(postsOpen ? job.notes : job.notes.slice(0, 3)).map((row) => (
-        <View key={row.id} style={styles.post}>
-          <View style={styles.row}>
-            <Text style={styles.postMeta}>
-              {noteLabel(row.type)}
-              {row.author ? ` · ${row.author}` : ''}
-            </Text>
-            <Text style={styles.when}>{ago(row.created_at)}</Text>
-          </View>
-          {row.type === 'system' ? <Text style={styles.system}>{row.body}</Text> : <NoteBody body={row.body} />}
-        </View>
-      ))}
-      {job.notes.length > 3 ? (
-        <Pressable onPress={() => setPostsOpen((open) => !open)}>
-          <Text style={styles.link}>{postsOpen ? 'Show latest' : `Show ${job.notes.length - 3} earlier`}</Text>
-        </Pressable>
-      ) : null}
+      </KeyboardAvoidingView>
     </Screen>
   );
 }
 
+function sameWords(left: string | null | undefined, right: string | null | undefined): boolean {
+  const normalize = (value: string | null | undefined) => (value ?? '').replace(/\s+/g, ' ').trim().toLowerCase();
+  const a = normalize(left);
+  const b = normalize(right);
+
+  return a !== '' && a === b;
+}
+
+function threadItems(job: Job | null): ThreadItem[] {
+  if (!job) {
+    return [];
+  }
+
+  const items: ThreadItem[] = [];
+  const description = (job.description ?? '').trim();
+  const request = splitNote(description);
+
+  if (request.preview) {
+    items.push({
+      key: 'request',
+      body: description,
+      who: 'Request',
+      when: '',
+      staff: false,
+      system: false,
+      showWho: true,
+    });
+  }
+
+  let previous = '';
+
+  const notes = [...job.notes].sort((a, b) => (a.created_at ?? '').localeCompare(b.created_at ?? ''));
+
+  for (const note of notes) {
+    if (note.type === 'system' || (note.body ?? '').trim() === 'Attachments from inbound email') {
+      continue;
+    }
+
+    if (note.type === 'customer' && !note.author && sameWords(note.body, description)) {
+      continue;
+    }
+
+    if (!splitNote(note.body).preview) {
+      continue;
+    }
+
+    const staff = note.type !== 'customer';
+    const who = note.author ?? (staff ? 'Staff' : 'Customer');
+    const showWho = who !== previous;
+
+    items.push({
+      key: String(note.id),
+      body: note.body,
+      who,
+      when: chatWhen(note.created_at),
+      staff,
+      system: false,
+      showWho,
+    });
+    previous = who;
+  }
+
+  return items;
+}
+
 const styles = StyleSheet.create({
   pad: { padding: 16, gap: 12 },
+  column: { flex: 1 },
+  flex: { flex: 1 },
   back: { color: '#fff', fontFamily: font.bold, fontSize: 15 },
-  summary: { gap: 8 },
+  call: { width: 36, height: 36, borderRadius: 18, alignItems: 'center', justifyContent: 'center', backgroundColor: 'rgba(255,255,255,0.12)' },
+  summary: { paddingHorizontal: 16, paddingTop: 10, gap: 8 },
   summaryMeta: { color: colors.muted, fontFamily: font.medium, flex: 1 },
   row: { flexDirection: 'row', alignItems: 'center', gap: 8 },
   links: { flexDirection: 'row', gap: 16 },
   link: { color: colors.greenDark, fontFamily: font.bold },
-  tools: { flexDirection: 'row', gap: 8 },
-  tool: { flex: 1, backgroundColor: colors.card, borderWidth: 1, borderColor: colors.line, borderRadius: 12, paddingVertical: 10, alignItems: 'center' },
-  toolOn: { borderColor: colors.greenDark, backgroundColor: colors.greenSoft },
-  toolText: { color: colors.ink, fontFamily: font.bold, fontSize: 13 },
-  panel: { backgroundColor: colors.card, borderWidth: 1, borderColor: colors.line, borderRadius: 12, padding: 12, gap: 8 },
-  kicker: { color: colors.ink, fontFamily: font.bold, fontSize: 13 },
-  post: { paddingVertical: 8, borderBottomWidth: 1, borderBottomColor: colors.line, gap: 4 },
-  postMeta: { color: colors.muted, fontFamily: font.semibold, fontSize: 12, flex: 1 },
-  when: { color: colors.muted, fontFamily: font.medium, fontSize: 12 },
-  system: { color: colors.ink, fontFamily: font.regular, fontSize: 14 },
-  input: {
+  parts: { backgroundColor: colors.card, borderWidth: 1, borderColor: colors.line, borderRadius: 14, paddingHorizontal: 12, paddingVertical: 10, gap: 3 },
+  partsTitle: { flex: 1, color: colors.ink, fontFamily: font.bold, fontSize: 14 },
+  partsLink: { color: colors.greenDark, fontFamily: font.bold, fontSize: 14 },
+  partLine: { color: colors.ink, fontFamily: font.regular, fontSize: 13 },
+  partEmpty: { color: colors.muted, fontFamily: font.regular, fontSize: 13 },
+  partMore: { color: colors.muted, fontFamily: font.medium, fontSize: 12 },
+  list: { flex: 1 },
+  panel: { backgroundColor: colors.card, borderTopWidth: 1, borderTopColor: colors.line, padding: 12, gap: 8 },
+  thread: { paddingHorizontal: 12, paddingTop: 12, paddingBottom: 8, gap: 4 },
+  bubble: { maxWidth: '78%', borderRadius: 16, paddingHorizontal: 10, paddingTop: 6, paddingBottom: 4, gap: 2 },
+  staff: { alignSelf: 'flex-end', backgroundColor: colors.greenSoft, borderBottomRightRadius: 4 },
+  customer: { alignSelf: 'flex-start', backgroundColor: colors.card, borderWidth: 1, borderColor: colors.line, borderBottomLeftRadius: 4 },
+  who: { color: colors.ink, fontFamily: font.semibold, fontSize: 12 },
+  when: { alignSelf: 'flex-end', color: colors.muted, fontFamily: font.medium, fontSize: 10, marginTop: 1 },
+  system: { alignSelf: 'center', color: colors.muted, fontFamily: font.medium, fontSize: 12, textAlign: 'center', marginVertical: 6, paddingHorizontal: 16 },
+  composer: {
+    flexDirection: 'row',
+    alignItems: 'flex-end',
+    gap: 8,
+    paddingHorizontal: 10,
+    paddingTop: 8,
+    paddingBottom: 10,
+    borderTopWidth: 1,
+    borderTopColor: colors.line,
     backgroundColor: colors.paper,
+  },
+  cameraButton: { width: 36, height: 36, alignItems: 'center', justifyContent: 'center' },
+  input: {
+    flex: 1,
+    maxHeight: 120,
+    backgroundColor: colors.card,
     borderColor: colors.line,
     borderWidth: 1,
-    borderRadius: 12,
-    padding: 12,
+    borderRadius: 20,
+    paddingHorizontal: 14,
+    paddingVertical: 8,
     color: colors.ink,
-    minHeight: 44,
+    fontFamily: font.regular,
+    fontSize: 15,
   },
-  padSign: { height: 180, borderWidth: 1, borderColor: colors.line, borderRadius: 12, overflow: 'hidden' },
-  camera: { height: 220, borderRadius: 12, overflow: 'hidden', backgroundColor: colors.ink, alignItems: 'center', justifyContent: 'center' },
+  send: { width: 36, height: 36, borderRadius: 18, backgroundColor: colors.accent, alignItems: 'center', justifyContent: 'center' },
+  sendOff: { opacity: 0.4 },
+  camera: { height: 160, borderRadius: 12, overflow: 'hidden', backgroundColor: colors.ink, alignItems: 'center', justifyContent: 'center' },
   cameraText: { color: '#fff', textAlign: 'center', paddingHorizontal: 16, fontFamily: font.medium },
 });

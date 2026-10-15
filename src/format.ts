@@ -12,6 +12,33 @@ export function greeting(date = new Date()): string {
   return 'Good evening';
 }
 
+export function callablePhone(phone: string | null | undefined): string | null {
+  const value = (phone ?? '').trim();
+  const digits = value.replace(/\D/g, '');
+
+  if (digits.length < 7 || /^(\d)\1+$/.test(digits)) {
+    return null;
+  }
+
+  return value;
+}
+
+export function chatWhen(iso: string | null | undefined): string {
+  if (!iso) {
+    return '';
+  }
+
+  const date = new Date(iso);
+  const time = date.toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' });
+  const now = new Date();
+
+  if (date.toDateString() === now.toDateString()) {
+    return time;
+  }
+
+  return `${date.toLocaleDateString('en-GB', { day: 'numeric', month: 'short' })} ${time}`;
+}
+
 export function clock(iso: string | null | undefined): string {
   if (!iso) {
     return '';

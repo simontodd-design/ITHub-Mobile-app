@@ -1,13 +1,25 @@
 import { CameraView, useCameraPermissions } from 'expo-camera';
-import { useFocusEffect, useLocalSearchParams } from 'expo-router';
+import { useFocusEffect, useLocalSearchParams, useRouter } from 'expo-router';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { FlatList, Modal, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
+import { FlatList, Pressable, ScrollView, SectionList, StyleSheet, Text, TextInput, View } from 'react-native';
 import { api, ApiError } from '@/api';
 import { clientId, enqueue } from '@/offline';
 import { colors, font } from '@/theme';
 import { BrandHeader, Meta, Notice, Screen } from '@/ui';
 
-type Taken = { id: number; name: string | null; quantity: number; held?: boolean };
+type Place = { name: string; quantity: number };
+
+type Taken = {
+  id: number;
+  name: string | null;
+  part_number?: string | null;
+  quantity: number;
+  held?: boolean;
+  is_serialised?: boolean;
+  serial?: string | null;
+  location?: string | null;
+  places?: Place[];
+};
 
 type PendingSerial = { id: number; name: string };
 
@@ -16,6 +28,21 @@ type ScanResult = {
   product?: { id?: number; name?: string };
   taken?: Taken[];
   remaining?: number;
+};
+
+type CatalogueProduct = {
+  id: number;
+  name: string;
+  part_number: string | null;
+  barcode: string | null;
+  is_serialised: boolean;
+  free: number;
+};
+
+type CatalogueSerial = {
+  id: number;
+  serial_number: string;
+  location: string | null;
 };
 
 type JobOption = {
@@ -28,33 +55,39 @@ type JobOption = {
 };
 
 export default function ScanScreen() {
+  const router = useRouter();
   const params = useLocalSearchParams<{ ticket?: string }>();
   const [permission, requestPermission] = useCameraPermissions();
-  const [code, setCode] = useState('');
   const [ticketId, setTicketId] = useState(params.ticket ?? '');
   const [jobs, setJobs] = useState<JobOption[]>([]);
   const [todayIds, setTodayIds] = useState<number[]>([]);
-  const [picking, setPicking] = useState(false);
+  const [jobsReady, setJobsReady] = useState(false);
   const [query, setQuery] = useState('');
   const [mode, setMode] = useState<'out' | 'back'>('out');
   const [message, setMessage] = useState<string | null>(null);
   const [taken, setTaken] = useState<Taken[]>([]);
-  const [quantity, setQuantity] = useState('1');
   const [pending, setPending] = useState<PendingSerial | null>(null);
+  const [adding, setAdding] = useState(false);
+  const [productQuery, setProductQuery] = useState('');
+  const [products, setProducts] = useState<CatalogueProduct[]>([]);
+  const [serialProduct, setSerialProduct] = useState<CatalogueProduct | null>(null);
+  const [serials, setSerials] = useState<CatalogueSerial[]>([]);
+  const [serialQuery, setSerialQuery] = useState('');
+  const [catalogueError, setCatalogueError] = useState<string | null>(null);
+  const [addingBusy, setAddingBusy] = useState(false);
   const lastHit = useRef({ code: '', at: 0 });
   const queue = useRef<string[]>([]);
   const pumping = useRef(false);
   const modeRef = useRef(mode);
   const ticketRef = useRef(ticketId);
   const pendingRef = useRef<PendingSerial | null>(null);
-  const quantityRef = useRef('1');
   const holdBarcode = useRef<string | null>(null);
   const holdUntil = useRef(0);
   const ticketSeen = useRef(ticketId);
+  const routedTicket = useRef(params.ticket ?? '');
   modeRef.current = mode;
   ticketRef.current = ticketId;
   pendingRef.current = pending;
-  quantityRef.current = quantity;
 
   const loadTaken = useCallback(async (id: string) => {
     if (!id) {
@@ -83,24 +116,25 @@ export default function ScanScreen() {
       }
     }
 
-    const unique = [...byId.values()];
-    setJobs(unique);
+    setJobs([...byId.values()]);
     setTodayIds(scheduled.filter((id, index) => scheduled.indexOf(id) === index));
-    setTicketId((current) => current || (unique.length === 1 ? String(unique[0].id) : ''));
   }, []);
 
   useFocusEffect(
     useCallback(() => {
-      if (params.ticket) {
-        setTicketId(params.ticket);
+      const incoming = params.ticket ?? '';
+
+      if (incoming && incoming !== routedTicket.current) {
+        routedTicket.current = incoming;
+        setTicketId(incoming);
         setMode('out');
+        clearPending();
       }
 
-      load().catch((err: Error) => setMessage(err.message));
-      if (params.ticket) {
-        loadTaken(params.ticket).catch(() => undefined);
-      }
-    }, [load, loadTaken, params.ticket]),
+      load()
+        .catch((err: Error) => setMessage(err.message))
+        .finally(() => setJobsReady(true));
+    }, [load, params.ticket]),
   );
 
   useEffect(() => {
@@ -119,10 +153,13 @@ export default function ScanScreen() {
   }, [ticketId, loadTaken]);
 
   const selected = jobs.find((job) => String(job.id) === ticketId) ?? null;
+  const waiting = taken.filter((line) => line.held);
+  const scanned = taken.filter((line) => !line.held);
 
   const shown = useMemo(() => {
     const needle = query.trim().toLowerCase();
-    const matches = jobs.filter((job) => {
+
+    return jobs.filter((job) => {
       if (!needle) {
         return true;
       }
@@ -133,13 +170,27 @@ export default function ScanScreen() {
         .toLowerCase()
         .includes(needle);
     });
+  }, [jobs, query]);
 
-    if (needle) {
-      return matches;
+  const sections = useMemo(() => {
+    if (query.trim()) {
+      return shown.length ? [{ title: 'Matches', data: shown }] : [];
     }
 
-    return [...matches].sort((a, b) => Number(todayIds.includes(b.id)) - Number(todayIds.includes(a.id)));
-  }, [jobs, query, todayIds]);
+    const today = shown.filter((job) => todayIds.includes(job.id));
+    const rest = shown.filter((job) => !todayIds.includes(job.id));
+    const next: { title: string; data: JobOption[] }[] = [];
+
+    if (today.length > 0) {
+      next.push({ title: 'Today', data: today });
+    }
+
+    if (rest.length > 0) {
+      next.push({ title: today.length > 0 ? 'Other jobs' : 'Open jobs', data: rest });
+    }
+
+    return next;
+  }, [shown, query, todayIds]);
 
   function heldBack(code: string) {
     return holdBarcode.current === code && (pendingRef.current !== null || Date.now() < holdUntil.current);
@@ -161,12 +212,164 @@ export default function ScanScreen() {
     setPending(null);
   }
 
+  function placeLabel(line: Taken): string | null {
+    if (line.location) {
+      return line.location;
+    }
+
+    const places = line.places ?? [];
+
+    if (places.length === 0) {
+      return null;
+    }
+
+    return places.map((place) => `${place.quantity} at ${place.name}`).join(' · ');
+  }
+
+  function scanHint(line: Taken): string {
+    if (line.serial) {
+      return `Scan serial ${line.serial}`;
+    }
+
+    if (line.is_serialised) {
+      return line.quantity > 1 ? `Scan ${line.quantity} serials` : 'Scan a serial';
+    }
+
+    return 'Scan the barcode';
+  }
+
   function choose(job: JobOption) {
-    setTicketId(String(job.id));
-    setPicking(false);
+    const id = String(job.id);
+    routedTicket.current = id;
+    setTicketId(id);
     setQuery('');
     setMessage(null);
+    setMode('out');
     clearPending();
+    router.setParams({ ticket: id });
+  }
+
+  function changeTicket() {
+    routedTicket.current = '';
+    setTicketId('');
+    setQuery('');
+    setMessage(null);
+    setMode('out');
+    closeCatalogue();
+    clearPending();
+    router.setParams({ ticket: '' });
+  }
+
+  function closeCatalogue() {
+    setAdding(false);
+    setProductQuery('');
+    setProducts([]);
+    setSerialProduct(null);
+    setSerials([]);
+    setSerialQuery('');
+    setCatalogueError(null);
+    setAddingBusy(false);
+  }
+
+  function openCatalogue() {
+    setCatalogueError(null);
+    setSerialProduct(null);
+    setAdding(true);
+  }
+
+  useEffect(() => {
+    if (!adding || serialProduct) {
+      return;
+    }
+
+    const handle = setTimeout(() => {
+      const needle = productQuery.trim();
+      api<{ products: CatalogueProduct[] }>(`/mobile/products?q=${encodeURIComponent(needle)}`)
+        .then((payload) => {
+          setProducts(payload.products);
+          setCatalogueError(null);
+        })
+        .catch((err: Error) => setCatalogueError(err.message));
+    }, 200);
+
+    return () => clearTimeout(handle);
+  }, [adding, productQuery, serialProduct]);
+
+  async function chooseProduct(product: CatalogueProduct) {
+    if (addingBusy) {
+      return;
+    }
+
+    if (product.is_serialised) {
+      setAddingBusy(true);
+      setCatalogueError(null);
+      setSerialQuery('');
+
+      try {
+        const payload = await api<{ serials: CatalogueSerial[] }>(`/mobile/products/${product.id}/serials`);
+        setSerialProduct(product);
+        setSerials(payload.serials);
+      } catch (err) {
+        setCatalogueError(err instanceof Error ? err.message : 'Could not load serials.');
+      } finally {
+        setAddingBusy(false);
+      }
+
+      return;
+    }
+
+    const code = product.barcode || product.part_number;
+
+    if (!code) {
+      setCatalogueError('This part has no barcode.');
+      return;
+    }
+
+    await addByCode(code);
+  }
+
+  async function addByCode(code: string) {
+    const ticket = ticketRef.current;
+
+    if (!ticket || addingBusy) {
+      return;
+    }
+
+    setAddingBusy(true);
+    setCatalogueError(null);
+
+    try {
+      const result = await api<ScanResult>(`/mobile/tickets/${ticket}/basket/scan`, {
+        method: 'POST',
+        body: { barcode: code, quantity: 1 },
+      });
+
+      if (result.needs_serial) {
+        setCatalogueError('Choose a serial for this part.');
+        return;
+      }
+
+      setTaken(result.taken ?? []);
+      setMessage(`${result.product?.name ?? 'Part'} is on this job.`);
+      closeCatalogue();
+    } catch (err) {
+      if (ticket && !(err instanceof ApiError && err.status >= 400 && err.status < 500)) {
+        await enqueue({
+          client_id: clientId('scan'),
+          type: 'scan',
+          ticket_id: Number(ticket),
+          barcode: code,
+          quantity: 1,
+        });
+        setMessage('Saved on the phone. It will sync when the signal returns.');
+        closeCatalogue();
+        return;
+      }
+
+      setCatalogueError(err instanceof Error ? err.message : 'Could not add that part.');
+    } finally {
+      setAddingBusy(false);
+    }
   }
 
   function submit(value: string) {
@@ -210,15 +413,14 @@ export default function ScanScreen() {
         }
 
         try {
-          const waiting = pendingRef.current;
-          const amount = Math.max(1, Number.parseInt(quantityRef.current, 10) || 1);
+          const waitingSerial = pendingRef.current;
           const result = await api<ScanResult>(
             `/mobile/tickets/${ticket}/basket/${returning ? 'return' : 'scan'}`,
             {
               method: 'POST',
-              body: waiting
-                ? { barcode: trimmed, product_id: waiting.id }
-                : { barcode: trimmed, quantity: returning ? 1 : amount },
+              body: waitingSerial
+                ? { barcode: trimmed, product_id: waitingSerial.id }
+                : { barcode: trimmed, quantity: 1 },
             },
           );
 
@@ -229,7 +431,6 @@ export default function ScanScreen() {
             pendingRef.current = next;
             setPending(next);
             setMessage(returning ? `Scan the serial on ${next.name} to put it back.` : `Scan the serial on ${next.name}.`);
-            setCode('');
             if (result.taken) {
               setTaken(result.taken);
             }
@@ -237,10 +438,6 @@ export default function ScanScreen() {
           }
 
           pauseHeldBarcode();
-          if (!returning) {
-            quantityRef.current = '1';
-            setQuantity('1');
-          }
           const name = result.product?.name ?? trimmed;
           const left = result.remaining ?? 0;
           setTaken(result.taken ?? []);
@@ -251,7 +448,6 @@ export default function ScanScreen() {
                 : `${name} is back in Ithub Store.`
               : `${name} is on this job.`,
           );
-          setCode('');
         } catch (err) {
           if (!returning && ticket && !(err instanceof ApiError && err.status >= 400 && err.status < 500)) {
             await enqueue({
@@ -259,10 +455,9 @@ export default function ScanScreen() {
               type: 'scan',
               ticket_id: Number(ticket),
               barcode: trimmed,
-              quantity: Math.max(1, Number.parseInt(quantityRef.current, 10) || 1),
+              quantity: 1,
             });
             setMessage('Saved on the phone. It will sync when the signal returns.');
-            setCode('');
           } else {
             setMessage(err instanceof Error ? err.message : 'Scan failed.');
           }
@@ -273,157 +468,242 @@ export default function ScanScreen() {
     }
   }
 
+  const ticketTitle = selected?.subject ?? `Ticket #${ticketId}`;
+  const ticketMeta = selected
+    ? [`#${selected.id}`, selected.customer?.name, selected.site?.name].filter(Boolean).join(' · ')
+    : 'Parts for this job';
+
+  if (adding) {
+    const shownSerials = serials.filter((serial) => {
+      const needle = serialQuery.trim().toLowerCase();
+
+      if (!needle) {
+        return true;
+      }
+
+      return [serial.serial_number, serial.location].filter(Boolean).join(' ').toLowerCase().includes(needle);
+    });
+
+    return (
+      <Screen scroll={false} header={<BrandHeader eyebrow="Hardware" title="Scan" />}>
+        <View style={styles.picker}>
+          <View style={styles.catalogueHead}>
+            <Text style={styles.lead}>{serialProduct ? serialProduct.name : 'Add a part'}</Text>
+            <Pressable onPress={serialProduct ? () => { setSerialProduct(null); setCatalogueError(null); } : closeCatalogue}>
+              <Text style={styles.change}>{serialProduct ? 'Back' : 'Close'}</Text>
+            </Pressable>
+          </View>
+          <TextInput
+            autoFocus
+            onChangeText={serialProduct ? setSerialQuery : setProductQuery}
+            placeholder={serialProduct ? 'Search serial or location' : 'Search name, part number, or barcode'}
+            placeholderTextColor={colors.muted}
+            style={styles.search}
+            value={serialProduct ? serialQuery : productQuery}
+          />
+          {catalogueError ? <View style={styles.catalogueNote}><Notice>{catalogueError}</Notice></View> : null}
+          {serialProduct ? (
+            <FlatList
+              data={shownSerials}
+              keyboardShouldPersistTaps="handled"
+              keyExtractor={(serial) => String(serial.id)}
+              contentContainerStyle={styles.pickerList}
+              ListEmptyComponent={<Meta>{addingBusy ? 'Loading serials…' : 'No serials in stock.'}</Meta>}
+              renderItem={({ item }) => (
+                <Pressable disabled={addingBusy} onPress={() => addByCode(item.serial_number)} style={styles.row}>
+                  <View style={styles.copy}>
+                    <Text numberOfLines={1} style={styles.rowSubject}>{item.serial_number}</Text>
+                    {item.location ? <Text style={styles.ticketMeta}>{item.location}</Text> : null}
+                  </View>
+                </Pressable>
+              )}
+            />
+          ) : (
+            <FlatList
+              data={products}
+              keyboardShouldPersistTaps="handled"
+              keyExtractor={(product) => String(product.id)}
+              contentContainerStyle={styles.pickerList}
+              ListEmptyComponent={<Meta>{catalogueError ? ' ' : 'No parts match that search.'}</Meta>}
+              renderItem={({ item }) => (
+                <Pressable disabled={addingBusy} onPress={() => chooseProduct(item)} style={styles.row}>
+                  <View style={styles.copy}>
+                    <Text numberOfLines={2} style={styles.rowSubject}>{item.name}</Text>
+                    <Text numberOfLines={1} style={styles.ticketMeta}>
+                      {item.part_number ?? 'No part number'}
+                      {item.is_serialised ? ' · Choose a serial' : item.free > 0 ? ` · ${item.free} in stock` : ''}
+                    </Text>
+                  </View>
+                </Pressable>
+              )}
+            />
+          )}
+        </View>
+      </Screen>
+    );
+  }
+
+  if (!ticketId) {
+    return (
+      <Screen scroll={false} header={<BrandHeader eyebrow="Hardware" title="Scan" />}>
+        <View style={styles.picker}>
+          <Text style={styles.lead}>Which job are these parts for?</Text>
+          <TextInput
+            autoFocus
+            onChangeText={setQuery}
+            placeholder="Search subject, customer, or number"
+            placeholderTextColor={colors.muted}
+            style={styles.search}
+            value={query}
+          />
+          <SectionList
+            sections={sections}
+            keyboardShouldPersistTaps="handled"
+            keyExtractor={(job) => String(job.id)}
+            contentContainerStyle={styles.pickerList}
+            stickySectionHeadersEnabled={false}
+            ListEmptyComponent={
+              <Meta>{jobsReady ? (jobs.length === 0 ? 'No open tickets to scan onto.' : 'Nothing matches that search.') : 'Loading jobs…'}</Meta>
+            }
+            renderSectionHeader={({ section }) => <Text style={styles.section}>{section.title}</Text>}
+            renderItem={({ item }) => (
+              <Pressable onPress={() => choose(item)} style={styles.row}>
+                <View style={styles.copy}>
+                  <Text numberOfLines={2} style={styles.rowSubject}>
+                    {item.subject}
+                  </Text>
+                  <Text numberOfLines={1} style={styles.ticketMeta}>
+                    #{item.id}
+                    {item.customer?.name ? ` · ${item.customer.name}` : ''}
+                    {item.site?.name ? ` · ${item.site.name}` : ''}
+                  </Text>
+                </View>
+                {item.is_fast_tracked ? <View style={styles.dot} /> : null}
+              </Pressable>
+            )}
+          />
+        </View>
+      </Screen>
+    );
+  }
+
   return (
     <Screen scroll={false} header={<BrandHeader eyebrow="Hardware" title="Scan" />}>
       <View style={styles.column}>
         {permission?.granted ? (
           <CameraView
             barcodeScannerSettings={{ barcodeTypes: ['qr', 'code128', 'ean13', 'code39'] }}
-            onBarcodeScanned={picking ? undefined : ({ data }) => submit(data)}
+            onBarcodeScanned={({ data }) => submit(data)}
             style={styles.camera}
           />
         ) : (
           <Pressable onPress={requestPermission} style={styles.camera}>
-            <Text style={styles.cameraText}>Allow the camera to scan a barcode or QR</Text>
+            <Text style={styles.cameraText}>Allow the camera to scan</Text>
           </Pressable>
         )}
         <View style={styles.frame} pointerEvents="none" />
-        <ScrollView contentContainerStyle={styles.panel}>
-          <View style={styles.modes}>
-            <Pressable onPress={() => { setMode('out'); clearPending(); }} style={[styles.mode, mode === 'out' ? styles.modeOn : null]}>
-              <Text style={mode === 'out' ? styles.modeOnText : styles.modeText}>Take for job</Text>
-            </Pressable>
-            <Pressable onPress={() => { setMode('back'); clearPending(); }} style={[styles.mode, mode === 'back' ? styles.modeOn : null]}>
-              <Text style={mode === 'back' ? styles.modeOnText : styles.modeText}>Back to store</Text>
-            </Pressable>
-          </View>
-          <Pressable onPress={() => setPicking(true)} style={[styles.ticket, selected ? styles.ticketOn : null]}>
-              {selected ? (
-                <>
-                  <View style={styles.ticketTop}>
-                    <Text numberOfLines={1} style={styles.ticketSubject}>
-                      {selected.subject}
-                    </Text>
-                    <Text style={styles.change}>Change</Text>
-                  </View>
-                  <Text numberOfLines={1} style={styles.ticketMeta}>
-                    #{selected.id}
-                    {selected.customer?.name ? ` · ${selected.customer.name}` : ''}
-                    {selected.site?.name ? ` · ${selected.site.name}` : ''}
-                  </Text>
-                </>
-              ) : (
-                <>
-                  <Text style={styles.ticketSubject}>{ticketId ? `Ticket #${ticketId}` : 'Choose a ticket'}</Text>
-                  <Text style={styles.ticketMeta}>
-                    {jobs.length === 0 ? 'No open tickets to scan onto.' : 'Search by subject, customer, or number.'}
-                  </Text>
-                </>
-              )}
-          </Pressable>
-          <Meta>
-            {pending
-              ? `Point the camera at the serial on ${pending.name}. The barcode is not enough.`
-              : mode === 'out'
-                ? 'Serialised parts: scan the serial. Other parts: scan the barcode.'
-                : 'Put one back. Serialised parts: scan the serial. Other parts: scan the barcode.'}
-          </Meta>
-          {pending ? (
-            <Pressable onPress={() => { clearPending(); setMessage(null); }}>
-              <Text style={styles.typeText}>Scan a barcode instead</Text>
-            </Pressable>
-          ) : null}
-          {mode === 'out' && !pending ? (
-            <View style={styles.qtyRow}>
-              <Text style={styles.qtyLabel}>Quantity</Text>
-              <TextInput
-                keyboardType="number-pad"
-                onChangeText={(value) => {
-                  quantityRef.current = value;
-                  setQuantity(value);
-                }}
-                style={styles.qtyInput}
-                value={quantity}
-              />
+        <ScrollView contentContainerStyle={styles.panel} keyboardShouldPersistTaps="handled">
+          <Pressable onPress={changeTicket} style={styles.ticket}>
+            <View style={styles.copy}>
+              <Text numberOfLines={1} style={styles.ticketSubject}>
+                {ticketTitle}
+              </Text>
+              <Text numberOfLines={1} style={styles.ticketMeta}>
+                {ticketMeta}
+              </Text>
             </View>
-          ) : null}
-          <TextInput
-            onChangeText={setCode}
-            onSubmitEditing={() => submit(code)}
-            placeholder="Or type the code"
-            placeholderTextColor={colors.muted}
-            style={styles.input}
-            value={code}
-          />
-          <Pressable onPress={() => submit(code)} style={styles.type}>
-            <Text style={styles.typeText}>Use typed code</Text>
+            <Text style={styles.change}>Change</Text>
           </Pressable>
           {message ? <Notice>{message}</Notice> : null}
-          <Text style={styles.heading}>Held for this job</Text>
-          {taken.some((line) => line.held) ? null : <Meta>Nothing held. The office can hold parts before the visit.</Meta>}
-          {taken.filter((line) => line.held).map((line) => (
-            <View key={line.id} style={styles.taken}>
-              <Text numberOfLines={1} style={styles.product}>
-                {line.name ?? 'Part'}
-              </Text>
-              <Text style={styles.qty}>× {line.quantity}</Text>
-            </View>
-          ))}
-          <Text style={styles.heading}>Scanned out</Text>
-          {taken.some((line) => !line.held) ? null : <Meta>Nothing scanned out yet. Scan a serial to send a held part out.</Meta>}
-          {taken.filter((line) => !line.held).map((line) => (
-            <View key={line.id} style={styles.taken}>
-              <Text numberOfLines={1} style={styles.product}>
-                {line.name ?? 'Part'}
-              </Text>
-              <Text style={styles.qty}>× {line.quantity}</Text>
-            </View>
-          ))}
-        </ScrollView>
-        <Modal animationType="slide" onRequestClose={() => setPicking(false)} visible={picking}>
-          <View style={styles.picker}>
-            <View style={styles.pickerHead}>
-              <Text style={styles.pickerTitle}>Choose a ticket</Text>
-              <Pressable onPress={() => setPicking(false)}>
-                <Text style={styles.change}>Close</Text>
+          {pending ? (
+            <View style={styles.serial}>
+              <Text style={styles.serialText}>Scan the serial on {pending.name}</Text>
+              <Pressable onPress={() => { clearPending(); setMessage(null); }}>
+                <Text style={styles.change}>Cancel</Text>
               </Pressable>
             </View>
-            <TextInput
-              autoFocus
-              onChangeText={setQuery}
-              placeholder="Search subject, customer, or number"
-              placeholderTextColor={colors.muted}
-              style={styles.search}
-              value={query}
-            />
-            <Text style={styles.count}>
-              {shown.length} of {jobs.length}
-            </Text>
-            <FlatList
-              data={shown}
-              keyboardShouldPersistTaps="handled"
-              keyExtractor={(job) => String(job.id)}
-              contentContainerStyle={styles.pickerList}
-              ListEmptyComponent={<Meta>{jobs.length === 0 ? 'No open tickets to scan onto.' : 'Nothing matches that search.'}</Meta>}
-              renderItem={({ item }) => (
-                <Pressable onPress={() => choose(item)} style={styles.row}>
-                  <View style={styles.copy}>
-                    <Text numberOfLines={1} style={styles.rowSubject}>
-                      {item.subject}
-                    </Text>
-                    <Text numberOfLines={1} style={styles.ticketMeta}>
-                      #{item.id}
-                      {item.customer?.name ? ` · ${item.customer.name}` : ''}
-                      {item.site?.name ? ` · ${item.site.name}` : ''}
-                      {!query.trim() && todayIds.includes(item.id) ? ' · Today' : ''}
-                    </Text>
-                  </View>
-                  {item.is_fast_tracked ? <View style={styles.dot} /> : null}
-                </Pressable>
+          ) : null}
+          {mode === 'out' ? (
+            <>
+              <Text style={styles.heading}>
+                {waiting.length > 0 ? `Get these · ${waiting.length}` : taken.length > 0 ? 'Reserved parts are scanned' : 'Nothing reserved'}
+              </Text>
+              {waiting.length === 0 ? (
+                <Meta>
+                  {taken.length > 0
+                    ? 'Scan any other barcode and it goes on this job.'
+                    : 'Nothing is held for this job. Scan a barcode to put a part on it.'}
+                </Meta>
+              ) : (
+                <Meta>Scan each one. Any other barcode still goes on this job.</Meta>
               )}
-            />
+              {waiting.map((line, index) => {
+                const where = placeLabel(line);
+
+                return (
+                  <View key={line.id} style={styles.pick}>
+                    <Text style={styles.index}>{index + 1}</Text>
+                    <View style={styles.copy}>
+                      <View style={styles.taken}>
+                        <Text numberOfLines={2} style={styles.product}>
+                          {line.name ?? 'Part'}
+                        </Text>
+                        <Text style={styles.qty}>× {line.quantity}</Text>
+                      </View>
+                      {where ? <Text style={styles.where}>{where}</Text> : null}
+                      <Text style={styles.pickMeta}>
+                        {scanHint(line)}
+                        {line.part_number ? ` · ${line.part_number}` : ''}
+                      </Text>
+                    </View>
+                  </View>
+                );
+              })}
+              {scanned.length > 0 ? (
+                <>
+                  <Text style={styles.heading}>On this job</Text>
+                  {scanned.map((line) => (
+                    <View key={line.id} style={styles.done}>
+                      <Text numberOfLines={1} style={styles.doneName}>
+                        {line.name ?? 'Part'}
+                      </Text>
+                      <Text style={styles.qty}>× {line.quantity}</Text>
+                    </View>
+                  ))}
+                </>
+              ) : null}
+            </>
+          ) : (
+            <>
+              <View style={styles.serial}>
+                <Text style={styles.serialText}>Putting a part back</Text>
+                <Pressable onPress={() => { setMode('out'); clearPending(); setMessage(null); }}>
+                  <Text style={styles.change}>Done</Text>
+                </Pressable>
+              </View>
+              <Meta>Scan the barcode, or the serial if it has one.</Meta>
+              {scanned.length === 0 ? <Meta>Nothing on this job to put back.</Meta> : null}
+              {scanned.map((line) => (
+                <View key={line.id} style={styles.done}>
+                  <Text numberOfLines={1} style={styles.doneName}>
+                    {line.name ?? 'Part'}
+                  </Text>
+                  <Text style={styles.qty}>× {line.quantity}</Text>
+                </View>
+              ))}
+            </>
+          )}
+        </ScrollView>
+        {mode === 'out' && !pending ? (
+          <View style={styles.actions}>
+            <Pressable onPress={openCatalogue} style={styles.action}>
+              <Text style={styles.actionText}>Add manually</Text>
+            </Pressable>
+            <Pressable onPress={() => { setMode('back'); clearPending(); setMessage(null); }} style={styles.action}>
+              <Text style={styles.actionText}>Put a part back</Text>
+            </Pressable>
           </View>
-        </Modal>
+        ) : null}
       </View>
     </Screen>
   );
@@ -431,33 +711,35 @@ export default function ScanScreen() {
 
 const styles = StyleSheet.create({
   column: { flex: 1 },
-  camera: { height: 220, backgroundColor: colors.ink, alignItems: 'center', justifyContent: 'center' },
-  cameraText: { color: '#fff', paddingHorizontal: 24, textAlign: 'center' },
+  camera: { height: 168, backgroundColor: colors.ink, alignItems: 'center', justifyContent: 'center' },
+  cameraText: { color: '#fff', paddingHorizontal: 24, textAlign: 'center', fontFamily: font.medium },
   frame: {
     position: 'absolute',
-    top: 36,
+    top: 28,
     alignSelf: 'center',
-    width: '70%',
-    height: 148,
+    width: '68%',
+    height: 112,
     borderWidth: 2,
     borderColor: colors.green,
     borderRadius: 12,
   },
   panel: { padding: 16, gap: 10, paddingBottom: 28 },
-  modes: { flexDirection: 'row', gap: 8 },
-  mode: { paddingVertical: 8, paddingHorizontal: 12, borderRadius: 20, backgroundColor: colors.card, borderWidth: 1, borderColor: colors.line },
-  modeOn: { backgroundColor: colors.accent, borderColor: colors.accent },
-  modeText: { color: colors.ink, fontWeight: '700' },
-  modeOnText: { color: '#fff', fontWeight: '700' },
-  ticket: { backgroundColor: colors.card, borderColor: colors.line, borderWidth: 1, borderRadius: 12, paddingHorizontal: 12, paddingVertical: 10, gap: 2 },
-  ticketOn: { borderColor: colors.greenDark, backgroundColor: colors.greenSoft },
-  ticketTop: { flexDirection: 'row', alignItems: 'center', gap: 8 },
-  ticketSubject: { flex: 1, color: colors.ink, fontFamily: font.semibold, fontSize: 15 },
+  ticket: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+    backgroundColor: colors.greenSoft,
+    borderColor: colors.greenDark,
+    borderWidth: 1,
+    borderRadius: 12,
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+  },
+  ticketSubject: { color: colors.ink, fontFamily: font.semibold, fontSize: 15 },
   ticketMeta: { color: colors.muted, fontFamily: font.regular, fontSize: 13 },
   change: { color: colors.greenDark, fontFamily: font.bold, fontSize: 14 },
-  picker: { flex: 1, backgroundColor: colors.paper, paddingTop: 48 },
-  pickerHead: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingHorizontal: 16, paddingBottom: 8 },
-  pickerTitle: { color: colors.ink, fontFamily: font.semibold, fontSize: 18 },
+  picker: { flex: 1, backgroundColor: colors.paper, paddingTop: 8 },
+  lead: { color: colors.ink, fontFamily: font.semibold, fontSize: 20, paddingHorizontal: 16, paddingBottom: 12 },
   search: {
     marginHorizontal: 16,
     backgroundColor: colors.card,
@@ -465,43 +747,105 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderRadius: 12,
     paddingHorizontal: 12,
-    paddingVertical: 10,
+    paddingVertical: 12,
     color: colors.ink,
     fontFamily: font.regular,
+    fontSize: 16,
   },
-  count: { color: colors.muted, fontFamily: font.medium, fontSize: 12, paddingHorizontal: 16, paddingTop: 8 },
-  pickerList: { paddingBottom: 24 },
+  pickerList: { paddingBottom: 24, paddingTop: 8 },
+  section: {
+    color: colors.muted,
+    fontFamily: font.bold,
+    fontSize: 12,
+    letterSpacing: 0.4,
+    textTransform: 'uppercase',
+    paddingHorizontal: 16,
+    paddingTop: 14,
+    paddingBottom: 4,
+  },
   row: {
     flexDirection: 'row',
     alignItems: 'center',
     gap: 10,
     marginHorizontal: 16,
-    paddingVertical: 11,
-    borderBottomWidth: 1,
-    borderBottomColor: colors.line,
+    marginTop: 8,
+    paddingHorizontal: 12,
+    paddingVertical: 14,
+    backgroundColor: colors.card,
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: colors.line,
   },
   copy: { flex: 1, gap: 2 },
-  rowSubject: { color: colors.ink, fontFamily: font.semibold, fontSize: 15 },
+  rowSubject: { color: colors.ink, fontFamily: font.semibold, fontSize: 16 },
   dot: { width: 8, height: 8, borderRadius: 4, backgroundColor: colors.green },
-  input: { backgroundColor: colors.card, borderColor: colors.line, borderWidth: 1, borderRadius: 12, padding: 12, color: colors.ink },
-  type: { alignSelf: 'flex-start' },
-  typeText: { color: colors.accent, fontWeight: '700' },
-  heading: { marginTop: 8, fontWeight: '800', color: colors.ink },
-  taken: { flexDirection: 'row', alignItems: 'center', gap: 8 },
-  product: { color: colors.ink, fontWeight: '700', flex: 1 },
-  qty: { color: colors.muted, fontFamily: font.semibold },
-  qtyRow: { flexDirection: 'row', alignItems: 'center', gap: 10 },
-  qtyLabel: { color: colors.ink, fontFamily: font.semibold, fontSize: 14 },
-  qtyInput: {
-    width: 72,
+  serial: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
     backgroundColor: colors.card,
     borderColor: colors.line,
     borderWidth: 1,
     borderRadius: 12,
-    paddingVertical: 8,
     paddingHorizontal: 12,
-    color: colors.ink,
-    fontFamily: font.semibold,
-    textAlign: 'center',
+    paddingVertical: 10,
   },
+  serialText: { flex: 1, color: colors.ink, fontFamily: font.semibold, fontSize: 14 },
+  heading: { marginTop: 6, color: colors.ink, fontFamily: font.bold, fontSize: 16 },
+  pick: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    gap: 10,
+    backgroundColor: colors.card,
+    borderColor: colors.line,
+    borderWidth: 1,
+    borderRadius: 12,
+    paddingHorizontal: 12,
+    paddingVertical: 12,
+  },
+  index: {
+    width: 28,
+    height: 28,
+    borderRadius: 14,
+    backgroundColor: colors.greenSoft,
+    color: colors.greenDark,
+    fontFamily: font.bold,
+    fontSize: 14,
+    textAlign: 'center',
+    lineHeight: 28,
+    overflow: 'hidden',
+  },
+  pickMeta: { color: colors.muted, fontFamily: font.regular, fontSize: 13 },
+  where: { color: colors.greenDark, fontFamily: font.semibold, fontSize: 14 },
+  taken: { flexDirection: 'row', alignItems: 'center', gap: 8 },
+  product: { color: colors.ink, fontFamily: font.bold, fontSize: 15, flex: 1 },
+  qty: { color: colors.muted, fontFamily: font.semibold },
+  done: { flexDirection: 'row', alignItems: 'center', gap: 8, paddingVertical: 2 },
+  doneName: { color: colors.ink, fontFamily: font.medium, fontSize: 14, flex: 1 },
+  actions: {
+    flexDirection: 'row',
+    gap: 8,
+    paddingHorizontal: 16,
+    paddingTop: 8,
+    paddingBottom: 12,
+    backgroundColor: colors.paper,
+  },
+  action: {
+    flex: 1,
+    alignItems: 'center',
+    backgroundColor: colors.card,
+    borderColor: colors.line,
+    borderWidth: 1,
+    borderRadius: 12,
+    paddingVertical: 12,
+  },
+  actionText: { color: colors.greenDark, fontFamily: font.bold, fontSize: 14 },
+  catalogueHead: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    gap: 12,
+    paddingRight: 16,
+  },
+  catalogueNote: { paddingHorizontal: 16 },
 });

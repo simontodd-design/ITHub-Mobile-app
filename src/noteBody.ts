@@ -35,7 +35,7 @@ const footerMarkers = [
 ];
 
 const HTML_TAG =
-  /<\s*\/?\s*(?:a|b|strong|i|em|u|s|br|p|div|span|ul|ol|li|table|thead|tbody|tr|th|td|h[1-6]|hr|blockquote|pre|code|img)\b(?=[\s>/])/i;
+  /<\s*\/?\s*(?:a|b|strong|i|em|u|s|br|p|div|span|ul|ol|li|table|thead|tbody|tr|th|td|h[1-6]|hr|blockquote|pre|code|img|html|body|font|center|o:p)\b(?=[\s>/])/i;
 
 export type NoteParts = {
   preview: string;
@@ -83,18 +83,28 @@ function decode(value: string): string {
     .replace(/&#39;/gi, "'");
 }
 
+function tidy(value: string): string {
+  return value
+    .replace(/\u00a0/g, ' ')
+    .replace(/\r\n/g, '\n')
+    .split('\n')
+    .map((line) => line.replace(/[ \t\u00a0]+/g, ' ').trim())
+    .join('\n')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
+}
+
 function htmlToPlain(html: string): string {
-  return decode(
-    html
-      .replace(/<br\s*\/?>/gi, '\n')
-      .replace(/<\/(?:p|div|tr|h[1-6]|li|table|blockquote)>/gi, '\n')
-      .replace(/<li\b[^>]*>/gi, '\n• ')
-      .replace(/<hr\b[^>]*>/gi, '\n')
-      .replace(/<[^>]+>/g, '')
-      .replace(/\r\n/g, '\n')
-      .replace(/[ \t]+\n/g, '\n')
-      .replace(/\n{3,}/g, '\n\n'),
-  ).trim();
+  const stripped = html
+    .replace(/<script[\s\S]*?<\/script>/gi, '')
+    .replace(/<style[\s\S]*?<\/style>/gi, '')
+    .replace(/<br\s*\/?>/gi, '\n')
+    .replace(/<\/(?:p|div|tr|h[1-6]|li|table|blockquote|pre)>/gi, '\n')
+    .replace(/<li\b[^>]*>/gi, '\n• ')
+    .replace(/<hr\b[^>]*>/gi, '\n')
+    .replace(/<[^>]+>/g, '');
+
+  return tidy(decode(stripped));
 }
 
 function inlineFooter(text: string): { preview: string; footer: string } | null {
@@ -140,7 +150,11 @@ export function splitNote(body: string | null | undefined): NoteParts {
     return { preview: '', hidden: '', collapsible: false, hasFooter: false };
   }
 
-  const text = HTML_TAG.test(raw) ? htmlToPlain(raw) : decode(raw);
+  const text = tidy(HTML_TAG.test(raw) ? htmlToPlain(raw) : decode(raw));
+
+  if (!text) {
+    return { preview: '', hidden: '', collapsible: false, hasFooter: false };
+  }
   const lines = text.split('\n');
   const footer = footerSplit(lines) ?? inlineFooter(text);
 
@@ -163,6 +177,29 @@ export function splitNote(body: string | null | undefined): NoteParts {
   }
 
   return { preview: text, hidden: '', collapsible: false, hasFooter: false };
+}
+
+export function signatureOnly(text: string): boolean {
+  const lines = text
+    .split('\n')
+    .map((line) => line.trim())
+    .filter(Boolean);
+
+  if (lines.length === 0) {
+    return true;
+  }
+
+  const signature = lines.filter(
+    (line) =>
+      /^(kind regards|best regards|warm regards|regards|thanks|thank you|cheers|many thanks)\b/i.test(line) ||
+      /^[A-Z][a-z]+(?:\s+[A-Z][a-z]+){0,3}$/.test(line) ||
+      /\b(director|manager|engineer|designer|developer|consultant|support)\b/i.test(line) ||
+      /(?:\+?\d[\d\s().-]{6,}\d)/.test(line) ||
+      /www\.|https?:|@/.test(line) ||
+      (line.includes('|') && line.length > 30),
+  );
+
+  return signature.length >= lines.length - (lines.length > 4 ? 1 : 0) && signature.length >= 2;
 }
 
 export function paragraphs(text: string): string[] {
