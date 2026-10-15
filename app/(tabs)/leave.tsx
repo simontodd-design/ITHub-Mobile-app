@@ -1,6 +1,5 @@
-import DateTimePicker from '@react-native-community/datetimepicker';
 import { useFocusEffect } from 'expo-router';
-import { useCallback, useState } from 'react';
+import { useCallback, useMemo, useState } from 'react';
 import { Pressable, StyleSheet, Text, TextInput, View } from 'react-native';
 import { api } from '@/api';
 import { prettyDate, ymd } from '@/format';
@@ -24,6 +23,28 @@ function kindLabel(kind: Leave['kind']): string {
   return 'Holiday';
 }
 
+const WEEKDAYS = ['Mo', 'Tu', 'We', 'Th', 'Fr', 'Sa', 'Su'];
+
+function startOfDay(date: Date): Date {
+  return new Date(date.getFullYear(), date.getMonth(), date.getDate());
+}
+
+function sameDay(a: Date, b: Date): boolean {
+  return a.getFullYear() === b.getFullYear() && a.getMonth() === b.getMonth() && a.getDate() === b.getDate();
+}
+
+function monthGrid(cursor: Date): Date[] {
+  const first = new Date(cursor.getFullYear(), cursor.getMonth(), 1);
+  const lead = (first.getDay() + 6) % 7;
+  const start = new Date(first);
+  start.setDate(1 - lead);
+  return Array.from({ length: 42 }, (_, index) => {
+    const day = new Date(start);
+    day.setDate(start.getDate() + index);
+    return day;
+  });
+}
+
 function daysBetween(start: string, end: string): number {
   const from = new Date(`${start}T00:00:00`);
   const to = new Date(`${end}T00:00:00`);
@@ -44,9 +65,10 @@ export default function LeaveScreen() {
   const [rows, setRows] = useState<Leave[]>([]);
   const [remaining, setRemaining] = useState<number | null>(null);
   const [allowance, setAllowance] = useState<number | null>(null);
-  const [starts, setStarts] = useState(new Date());
-  const [ends, setEnds] = useState(new Date());
-  const [picking, setPicking] = useState<'start' | 'end' | null>(null);
+  const [starts, setStarts] = useState(() => startOfDay(new Date()));
+  const [ends, setEnds] = useState(() => startOfDay(new Date()));
+  const [awaitingEnd, setAwaitingEnd] = useState(false);
+  const [month, setMonth] = useState(() => startOfDay(new Date()));
   const [kind, setKind] = useState<LeaveKind>('holiday');
   const [reason, setReason] = useState('');
   const [message, setMessage] = useState<string | null>(null);
@@ -64,6 +86,34 @@ export default function LeaveScreen() {
       load().catch((err: Error) => setMessage(err.message));
     }, [load]),
   );
+
+  const days = monthGrid(month);
+  const weekdays = useMemo(() => daysBetween(ymd(starts), ymd(ends < starts ? starts : ends)), [starts, ends]);
+  const spanLabel = weekdays === 1 ? '1 weekday' : `${weekdays} weekdays`;
+
+  function pick(day: Date) {
+    const date = startOfDay(day);
+
+    if (!awaitingEnd) {
+      setStarts(date);
+      setEnds(date);
+      setAwaitingEnd(true);
+      return;
+    }
+
+    if (date < starts) {
+      setEnds(starts);
+      setStarts(date);
+    } else {
+      setEnds(date);
+    }
+
+    setAwaitingEnd(false);
+  }
+
+  function shiftMonth(by: number) {
+    setMonth((current) => new Date(current.getFullYear(), current.getMonth() + by, 1));
+  }
 
   async function submit() {
     setBusy(true);
@@ -106,14 +156,44 @@ export default function LeaveScreen() {
         </Pressable>
       </View>
       <Card>
-        <Pressable onPress={() => setPicking('start')} style={styles.date}>
-          <Text style={styles.label}>From</Text>
-          <Text style={styles.value}>{starts.toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' })}</Text>
-        </Pressable>
-        <Pressable onPress={() => setPicking('end')} style={styles.date}>
-          <Text style={styles.label}>To</Text>
-          <Text style={styles.value}>{ends.toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' })}</Text>
-        </Pressable>
+        <View style={styles.monthRow}>
+          <Pressable hitSlop={8} onPress={() => shiftMonth(-1)}>
+            <Text style={styles.monthStep}>‹</Text>
+          </Pressable>
+          <View style={styles.flex}>
+            <Text style={styles.monthTitle}>{month.toLocaleDateString('en-GB', { month: 'long', year: 'numeric' })}</Text>
+            <Text style={styles.span}>{spanLabel}</Text>
+          </View>
+          <Pressable hitSlop={8} onPress={() => shiftMonth(1)}>
+            <Text style={styles.monthStep}>›</Text>
+          </Pressable>
+        </View>
+        <View style={styles.week}>
+          {WEEKDAYS.map((label) => (
+            <Text key={label} style={styles.weekday}>
+              {label}
+            </Text>
+          ))}
+        </View>
+        <View style={styles.grid}>
+          {days.map((day) => {
+            const inMonth = day.getMonth() === month.getMonth();
+            const from = starts < ends ? starts : ends;
+            const to = starts < ends ? ends : starts;
+            const selected = sameDay(day, from) || sameDay(day, to);
+            const inside = day > from && day < to;
+            const weekend = day.getDay() === 0 || day.getDay() === 6;
+
+            return (
+              <Pressable key={ymd(day)} onPress={() => pick(day)} style={[styles.cell, inside ? styles.cellInside : null, selected ? styles.cellOn : null]}>
+                <Text style={[styles.cellText, !inMonth ? styles.cellMuted : null, weekend && inMonth ? styles.cellWeekend : null, selected ? styles.cellOnText : null]}>
+                  {day.getDate()}
+                </Text>
+              </Pressable>
+            );
+          })}
+        </View>
+        <Text style={styles.hint}>{awaitingEnd ? 'Tap the last day.' : 'Tap the first day, then the last.'}</Text>
         <TextInput
           onChangeText={setReason}
           placeholder="Reason"
@@ -121,58 +201,57 @@ export default function LeaveScreen() {
           style={styles.input}
           value={reason}
         />
-        <Button disabled={busy} label={busy ? 'Sending…' : kind === 'sick' ? 'Record sick day' : 'Request holiday'} onPress={submit} />
+        <Button disabled={busy} label={busy ? 'Sending…' : kind === 'sick' ? `Record ${spanLabel}` : `Request ${spanLabel}`} onPress={submit} />
       </Card>
-      {picking ? (
-        <DateTimePicker
-          mode="date"
-          onChange={(_, date) => {
-            setPicking(null);
-
-            if (!date) {
-              return;
-            }
-
-            if (picking === 'start') {
-              setStarts(date);
-
-              if (date > ends) {
-                setEnds(date);
-              }
-            } else {
-              setEnds(date);
-            }
-          }}
-          value={picking === 'start' ? starts : ends}
-        />
-      ) : null}
       {message ? <Notice>{message}</Notice> : null}
-      {rows.length === 0 ? <Meta>No requests yet.</Meta> : null}
-      {rows.map((row) => (
-        <Card key={row.id}>
-          <View style={styles.row}>
+      <Text style={styles.bookedTitle}>Booked</Text>
+      {rows.length === 0 ? <Meta>No days booked yet.</Meta> : null}
+      {rows.map((row) => {
+        const booked = daysBetween(row.starts_on, row.ends_on);
+
+        return (
+          <View key={row.id} style={styles.booked}>
             <View style={styles.flex}>
-              <Text style={styles.value}>
-                {prettyDate(row.starts_on)} → {prettyDate(row.ends_on)}
-              </Text>
-              <Meta>
-                {kindLabel(row.kind)}
+              <Text numberOfLines={1} style={styles.bookedWhen}>
+                {prettyDate(row.starts_on)}
+                {row.starts_on === row.ends_on ? '' : ` – ${prettyDate(row.ends_on)}`}
                 {' · '}
-                {daysBetween(row.starts_on, row.ends_on)} weekday{daysBetween(row.starts_on, row.ends_on) === 1 ? '' : 's'}
+                {booked} day{booked === 1 ? '' : 's'}
+              </Text>
+              <Text numberOfLines={1} style={styles.bookedMeta}>
+                {kindLabel(row.kind)}
                 {row.reason ? ` · ${row.reason}` : ''}
-              </Meta>
+              </Text>
             </View>
             <Pill label={row.status} tone={row.status === 'approved' ? 'accent' : row.status === 'rejected' ? 'warn' : 'blue'} />
           </View>
-        </Card>
-      ))}
+        );
+      })}
     </Screen>
   );
 }
 
 const styles = StyleSheet.create({
   heading: { fontSize: 22, fontFamily: font.bold, color: colors.ink },
-  date: { paddingVertical: 8 },
+  monthRow: { flexDirection: 'row', alignItems: 'center', gap: 8 },
+  monthTitle: { color: colors.ink, fontFamily: font.bold, fontSize: 16 },
+  monthStep: { color: colors.ink, fontFamily: font.bold, fontSize: 28, paddingHorizontal: 6 },
+  span: { color: colors.greenDark, fontFamily: font.bold, fontSize: 13 },
+  week: { flexDirection: 'row' },
+  weekday: { flex: 1, textAlign: 'center', color: colors.muted, fontFamily: font.medium, fontSize: 11 },
+  grid: { flexDirection: 'row', flexWrap: 'wrap' },
+  cell: { width: '14.28%', height: 36, alignItems: 'center', justifyContent: 'center', borderRadius: 18 },
+  cellInside: { backgroundColor: colors.greenSoft, borderRadius: 0 },
+  cellOn: { backgroundColor: colors.accent, borderRadius: 20 },
+  cellText: { color: colors.ink, fontFamily: font.semibold, fontSize: 14 },
+  cellMuted: { color: colors.line },
+  cellWeekend: { color: colors.muted },
+  cellOnText: { color: '#fff' },
+  hint: { color: colors.muted, fontFamily: font.regular, fontSize: 12 },
+  bookedTitle: { color: colors.muted, fontFamily: font.bold, fontSize: 12, marginTop: 4 },
+  booked: { flexDirection: 'row', alignItems: 'center', gap: 8, paddingVertical: 6, borderBottomWidth: 1, borderBottomColor: colors.line },
+  bookedWhen: { color: colors.ink, fontFamily: font.semibold, fontSize: 13 },
+  bookedMeta: { color: colors.muted, fontFamily: font.regular, fontSize: 12 },
   label: { color: colors.muted },
   value: { color: colors.ink, fontWeight: '700', fontSize: 16 },
   days: { color: colors.ink, fontWeight: '800', fontSize: 22 },

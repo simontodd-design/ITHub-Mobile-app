@@ -8,7 +8,7 @@ import { useFonts } from 'expo-font';
 import { Stack, useRouter, useSegments } from 'expo-router';
 import { useEffect, useRef, useState } from 'react';
 import { StatusBar } from 'expo-status-bar';
-import { ActivityIndicator, View } from 'react-native';
+import { ActivityIndicator, BackHandler, View } from 'react-native';
 import { registerPush } from '@/push';
 import { getToken } from '@/session';
 import { colors } from '@/theme';
@@ -33,6 +33,18 @@ export default function RootLayout() {
       setReady(true);
     });
   }, [segments]);
+
+  useEffect(() => {
+    const sub = BackHandler.addEventListener('hardwareBackPress', () => {
+      if (segments[0] === '(tabs)' || !router.canGoBack()) {
+        return true;
+      }
+
+      return false;
+    });
+
+    return () => sub.remove();
+  }, [router, segments]);
 
   useEffect(() => {
     if (!ready) {
@@ -66,7 +78,9 @@ export default function RootLayout() {
   return (
     <>
       <StatusBar style="light" backgroundColor={colors.side} />
-      <Stack screenOptions={{ headerShown: false }} />
+      <Stack screenOptions={{ headerShown: false, gestureEnabled: true }}>
+        <Stack.Screen name="(tabs)" options={{ gestureEnabled: false }} />
+      </Stack>
     </>
   );
 }

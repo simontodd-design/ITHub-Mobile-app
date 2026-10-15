@@ -3,7 +3,7 @@ import { CameraView, useCameraPermissions } from 'expo-camera';
 import * as ImagePicker from 'expo-image-picker';
 import { useFocusEffect, useLocalSearchParams, useRouter } from 'expo-router';
 import { useCallback, useRef, useState } from 'react';
-import { FlatList, KeyboardAvoidingView, Linking, Platform, Pressable, StyleSheet, Text, TextInput, View } from 'react-native';
+import { FlatList, KeyboardAvoidingView, Linking, Modal, Platform, Pressable, StyleSheet, Text, TextInput, View } from 'react-native';
 import { api } from '@/api';
 import { callablePhone, chatWhen, mapsUrl } from '@/format';
 import { clientId, enqueue } from '@/offline';
@@ -29,7 +29,8 @@ type Job = {
   description: string | null;
   is_fast_tracked: boolean;
   status: string | null;
-  customer: { name: string } | null;
+  customer: { name: string; phone?: string | null } | null;
+  contact?: { name: string | null; phones?: string[] } | null;
   account_hold: { reason: string | null } | null;
   phone: string | null;
   site: { name: string; address: string; latitude: string | null; longitude: string | null } | null;
@@ -54,6 +55,7 @@ export default function JobScreen() {
   const [draft, setDraft] = useState('');
   const [message, setMessage] = useState<string | null>(null);
   const [photoOpen, setPhotoOpen] = useState(false);
+  const [contactsOpen, setContactsOpen] = useState(false);
   const [sending, setSending] = useState(false);
   const cameraRef = useRef<CameraView>(null);
   const [cameraPermission, requestCameraPermission] = useCameraPermissions();
@@ -152,7 +154,8 @@ export default function JobScreen() {
   }
 
   const directions = mapsUrl(job?.site);
-  const phone = callablePhone(job?.phone);
+  const contactPhones = phonesFor(job?.contact?.phones, job?.phone);
+  const businessPhone = callablePhone(job?.customer?.phone);
   const waiting = parts.filter((part) => part.held !== false).length;
   const thread = threadItems(job);
 
@@ -172,22 +175,48 @@ export default function JobScreen() {
       scroll={false}
       header={
         <BrandHeader eyebrow={job.customer?.name ?? 'Job'} title={job.subject}>
-          {phone ? (
-            <Pressable
-              accessibilityLabel={`Call ${phone}`}
-              hitSlop={8}
-              onPress={() => Linking.openURL(`tel:${phone}`)}
-              style={styles.call}
-            >
-              <Ionicons color="#fff" name="call" size={18} />
-            </Pressable>
-          ) : null}
+          <Pressable accessibilityLabel="People on this ticket" hitSlop={8} onPress={() => setContactsOpen(true)} style={styles.call}>
+            <Ionicons color="#fff" name="people-outline" size={20} />
+          </Pressable>
           <Pressable hitSlop={8} onPress={() => router.back()}>
             <Text style={styles.back}>Back</Text>
           </Pressable>
         </BrandHeader>
       }
     >
+      <Modal animationType="fade" onRequestClose={() => setContactsOpen(false)} transparent visible={contactsOpen}>
+        <Pressable onPress={() => setContactsOpen(false)} style={styles.sheetBackdrop}>
+          <Pressable onPress={() => undefined} style={styles.sheet}>
+            <Text style={styles.sheetTitle}>Who to call</Text>
+            <View style={styles.sheetBlock}>
+              <Text style={styles.sheetLabel}>On this ticket</Text>
+              <Text style={styles.sheetName}>{job.contact?.name || 'No contact on the ticket'}</Text>
+              {contactPhones.length === 0 ? <Text style={styles.sheetEmpty}>No number saved</Text> : null}
+              {contactPhones.map((number) => (
+                <Pressable key={number} onPress={() => Linking.openURL(`tel:${number}`)} style={styles.sheetCall}>
+                  <Text style={styles.sheetNumber}>{number}</Text>
+                  <Ionicons color={colors.greenDark} name="call" size={16} />
+                </Pressable>
+              ))}
+            </View>
+            <View style={styles.sheetBlock}>
+              <Text style={styles.sheetLabel}>Customer</Text>
+              <Text style={styles.sheetName}>{job.customer?.name || 'No customer'}</Text>
+              {businessPhone ? (
+                <Pressable onPress={() => Linking.openURL(`tel:${businessPhone}`)} style={styles.sheetCall}>
+                  <Text style={styles.sheetNumber}>{businessPhone}</Text>
+                  <Ionicons color={colors.greenDark} name="call" size={16} />
+                </Pressable>
+              ) : (
+                <Text style={styles.sheetEmpty}>No number saved</Text>
+              )}
+            </View>
+            <Pressable onPress={() => setContactsOpen(false)} style={styles.sheetClose}>
+              <Text style={styles.sheetCloseText}>Close</Text>
+            </Pressable>
+          </Pressable>
+        </Pressable>
+      </Modal>
       <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : undefined} style={styles.column}>
         <View style={styles.summary}>
           {job.account_hold ? (
@@ -290,6 +319,18 @@ export default function JobScreen() {
   );
 }
 
+function phonesFor(saved: string[] | undefined, fallback: string | null | undefined): string[] {
+  const numbers = (saved ?? []).map((number) => callablePhone(number)).filter((number): number is string => Boolean(number));
+
+  if (numbers.length > 0) {
+    return numbers;
+  }
+
+  const single = callablePhone(fallback);
+
+  return single ? [single] : [];
+}
+
 function sameWords(left: string | null | undefined, right: string | null | undefined): boolean {
   const normalize = (value: string | null | undefined) => (value ?? '').replace(/\s+/g, ' ').trim().toLowerCase();
   const a = normalize(left);
@@ -361,6 +402,17 @@ const styles = StyleSheet.create({
   flex: { flex: 1 },
   back: { color: '#fff', fontFamily: font.bold, fontSize: 15 },
   call: { width: 36, height: 36, borderRadius: 18, alignItems: 'center', justifyContent: 'center', backgroundColor: 'rgba(255,255,255,0.12)' },
+  sheetBackdrop: { flex: 1, backgroundColor: 'rgba(15, 23, 42, 0.45)', justifyContent: 'flex-end', padding: 16 },
+  sheet: { backgroundColor: colors.card, borderRadius: 20, padding: 16, gap: 14 },
+  sheetTitle: { color: colors.ink, fontFamily: font.bold, fontSize: 18 },
+  sheetBlock: { gap: 6 },
+  sheetLabel: { color: colors.muted, fontFamily: font.medium, fontSize: 12 },
+  sheetName: { color: colors.ink, fontFamily: font.semibold, fontSize: 16 },
+  sheetEmpty: { color: colors.muted, fontFamily: font.regular, fontSize: 14 },
+  sheetCall: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', backgroundColor: colors.greenSoft, borderRadius: 12, paddingHorizontal: 12, paddingVertical: 10 },
+  sheetNumber: { color: colors.ink, fontFamily: font.bold, fontSize: 16 },
+  sheetClose: { alignItems: 'center', paddingVertical: 8 },
+  sheetCloseText: { color: colors.muted, fontFamily: font.bold },
   summary: { paddingHorizontal: 16, paddingTop: 10, gap: 8 },
   summaryMeta: { color: colors.muted, fontFamily: font.medium, flex: 1 },
   row: { flexDirection: 'row', alignItems: 'center', gap: 8 },
