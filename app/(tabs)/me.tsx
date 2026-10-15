@@ -154,9 +154,6 @@ export default function MeScreen() {
           <Switch value={forced} onValueChange={toggleOffline} />
         </View>
       </Card>
-      {me?.can_manage_stock ? (
-        <Button label="Add stock" onPress={() => router.push('/stock')} />
-      ) : null}
       <Button label="Sign out" onPress={signOut} tone="ink" />
     </Screen>
   );

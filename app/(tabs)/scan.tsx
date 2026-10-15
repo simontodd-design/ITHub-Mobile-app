@@ -7,7 +7,7 @@ import { clientId, enqueue } from '@/offline';
 import { colors, font } from '@/theme';
 import { BrandHeader, Meta, Notice, Screen } from '@/ui';
 
-type Taken = { id: number; name: string | null; quantity: number };
+type Taken = { id: number; name: string | null; quantity: number; held?: boolean };
 
 type PendingSerial = { id: number; name: string };
 
@@ -323,10 +323,10 @@ export default function ScanScreen() {
           </Pressable>
           <Meta>
             {pending
-              ? `Point the camera at the serial on ${pending.name}.`
+              ? `Point the camera at the serial on ${pending.name}. The barcode is not enough.`
               : mode === 'out'
-                ? 'Scan the barcode. A serialised product then asks for the serial. Quantity stays at 1 unless you change it.'
-                : 'Scan the barcode to put one back. A serialised product asks for the serial.'}
+                ? 'Serialised parts: scan the serial. Other parts: scan the barcode.'
+                : 'Put one back. Serialised parts: scan the serial. Other parts: scan the barcode.'}
           </Meta>
           {pending ? (
             <Pressable onPress={() => { clearPending(); setMessage(null); }}>
@@ -359,9 +359,19 @@ export default function ScanScreen() {
             <Text style={styles.typeText}>Use typed code</Text>
           </Pressable>
           {message ? <Notice>{message}</Notice> : null}
-          <Text style={styles.heading}>On this job</Text>
-          {taken.length === 0 ? <Meta>Nothing scanned out yet. Keep scanning — each one is added.</Meta> : null}
-          {taken.map((line) => (
+          <Text style={styles.heading}>Held for this job</Text>
+          {taken.some((line) => line.held) ? null : <Meta>Nothing held. The office can hold parts before the visit.</Meta>}
+          {taken.filter((line) => line.held).map((line) => (
+            <View key={line.id} style={styles.taken}>
+              <Text numberOfLines={1} style={styles.product}>
+                {line.name ?? 'Part'}
+              </Text>
+              <Text style={styles.qty}>× {line.quantity}</Text>
+            </View>
+          ))}
+          <Text style={styles.heading}>Scanned out</Text>
+          {taken.some((line) => !line.held) ? null : <Meta>Nothing scanned out yet. Scan a serial to send a held part out.</Meta>}
+          {taken.filter((line) => !line.held).map((line) => (
             <View key={line.id} style={styles.taken}>
               <Text numberOfLines={1} style={styles.product}>
                 {line.name ?? 'Part'}

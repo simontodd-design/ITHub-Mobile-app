@@ -33,7 +33,7 @@ type Ticket = {
 };
 
 type Today = {
-  shift: { clocked_in_at: string } | null;
+  shift: { clocked_in_at: string; workplace?: string | null } | null;
   visits: Visit[];
   tickets: Ticket[];
 };
@@ -55,6 +55,7 @@ export default function TodayScreen() {
   const [message, setMessage] = useState<string | null>(null);
   const [refreshing, setRefreshing] = useState(false);
   const [busy, setBusy] = useState(false);
+  const [workplace, setWorkplace] = useState<'office' | 'home'>('office');
   const ticking = Boolean(today?.shift || me?.callout);
   const now = useNow(ticking);
   const phaseRef = useRef<string | null>(null);
@@ -105,7 +106,7 @@ export default function TodayScreen() {
 
     try {
       if (inShift) {
-        await api('/mobile/clock-in', { method: 'POST' });
+        await api('/mobile/clock-in', { method: 'POST', body: { workplace } });
         const warning = await startShiftTracking();
         setMessage(warning ?? 'Clocked in. Location is on until you clock out.');
       } else {
@@ -183,8 +184,28 @@ export default function TodayScreen() {
       <Card>
         <View style={styles.row}>
           <View style={styles.flex}>
-            <Meta>{today?.shift ? `Clocked in at ${clock(today.shift.clocked_in_at)}` : 'Not clocked in'}</Meta>
-            <Text style={styles.strong}>{today?.shift ? `${elapsed(today.shift.clocked_in_at, now)} today` : 'Tap to start your day'}</Text>
+            <Meta>
+              {today?.shift
+                ? `Clocked in at ${clock(today.shift.clocked_in_at)} · ${today.shift.workplace === 'home' ? 'Home' : 'Office'}`
+                : 'Not clocked in'}
+            </Meta>
+            <Text style={styles.strong}>{today?.shift ? `${elapsed(today.shift.clocked_in_at, now)} today` : 'Where are you working?'}</Text>
+            {today?.shift ? null : (
+              <View style={styles.places}>
+                <Pressable
+                  onPress={() => setWorkplace('office')}
+                  style={[styles.place, workplace === 'office' && styles.placeOn]}
+                >
+                  <Text style={styles.placeText}>Office</Text>
+                </Pressable>
+                <Pressable
+                  onPress={() => setWorkplace('home')}
+                  style={[styles.place, workplace === 'home' && styles.placeOn]}
+                >
+                  <Text style={styles.placeText}>Home</Text>
+                </Pressable>
+              </View>
+            )}
           </View>
           <Button
             disabled={busy}
@@ -289,4 +310,15 @@ const styles = StyleSheet.create({
   time: { color: colors.muted, fontWeight: '700' },
   clock: { fontVariant: ['tabular-nums'], fontWeight: '800', color: colors.ink, fontSize: 18 },
   link: { color: colors.accent, fontWeight: '700' },
+  places: { flexDirection: 'row', gap: 8, marginTop: 10 },
+  place: {
+    borderWidth: 1,
+    borderColor: colors.line,
+    borderRadius: 12,
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    backgroundColor: colors.card,
+  },
+  placeOn: { borderColor: colors.ink, borderWidth: 2 },
+  placeText: { fontFamily: font.bold, color: colors.ink, fontSize: 14 },
 });
