@@ -11,7 +11,8 @@
     "typecheck": "tsc --noEmit",
     "build:dev:android": "eas build --profile development --platform android",
     "build:dev:ios": "eas build --profile development --platform ios",
-    "build:prod": "eas build --profile production --platform all"
+    "build:prod": "eas build --profile production --platform all",
+    "build:apk": "eas build --profile apk --platform android"
   },
   "dependencies": {
     "@expo-google-fonts/instrument-sans": "^0.4.2",
