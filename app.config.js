@@ -7,7 +7,7 @@ module.exports = ({ config }) => ({
   slug: 'ithub-mobile',
   owner: 'simontodd',
   scheme: 'ithub',
-  version: '1.0.2',
+  version: '1.0.3',
   updates: {
     url: 'https://u.expo.dev/74d212d3-0cdb-427e-9bfd-e86f54312d94',
   },

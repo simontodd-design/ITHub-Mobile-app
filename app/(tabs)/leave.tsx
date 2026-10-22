@@ -9,7 +9,55 @@ import { BrandHeader, Button, Card, Meta, Notice, Pill, Screen } from '@/ui';
 
 type LeaveKind = 'holiday' | 'sick';
 
-type Leave = { id: number; starts_on: string; ends_on: string; reason: string | null; status: string; kind?: LeaveKind | 'off' };
+type Leave = {
+  id: number;
+  starts_on: string;
+  ends_on: string;
+  reason: string | null;
+  cancel_reason?: string | null;
+  status: string;
+  kind?: LeaveKind | 'off';
+};
+
+function statusLabel(status: string): string {
+  if (status === 'pending') {
+    return 'Waiting';
+  }
+
+  if (status === 'approved') {
+    return 'Approved';
+  }
+
+  if (status === 'cancel_requested') {
+    return 'Cancellation waiting';
+  }
+
+  if (status === 'rejected') {
+    return 'Not approved';
+  }
+
+  if (status === 'cancelled') {
+    return 'Cancelled';
+  }
+
+  return status;
+}
+
+function statusTone(status: string): 'muted' | 'blue' | 'accent' | 'warn' {
+  if (status === 'approved') {
+    return 'accent';
+  }
+
+  if (status === 'rejected' || status === 'cancel_requested') {
+    return 'warn';
+  }
+
+  if (status === 'cancelled') {
+    return 'muted';
+  }
+
+  return 'blue';
+}
 
 function kindLabel(kind: Leave['kind']): string {
   if (kind === 'sick') {
@@ -73,6 +121,9 @@ export default function LeaveScreen() {
   const [reason, setReason] = useState('');
   const [message, setMessage] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const [cancellingId, setCancellingId] = useState<number | null>(null);
+  const [cancelReason, setCancelReason] = useState('');
+  const [rowBusy, setRowBusy] = useState<number | null>(null);
 
   const load = useCallback(async () => {
     const result = await api<{ leave: Leave[]; remaining_days: number; allowance_days: number }>('/mobile/leave');
@@ -131,6 +182,32 @@ export default function LeaveScreen() {
       setMessage(err instanceof Error ? err.message : 'Request failed.');
     } finally {
       setBusy(false);
+    }
+  }
+
+  async function cancel(row: Leave, ask: boolean) {
+    setRowBusy(row.id);
+    setMessage(null);
+
+    try {
+      const result = await api<{ result: string }>(`/mobile/leave/${row.id}/cancel`, {
+        method: 'POST',
+        body: ask ? { reason: cancelReason } : {},
+      });
+      setCancellingId(null);
+      setCancelReason('');
+      setMessage(
+        result.result === 'requested'
+          ? 'Cancellation sent. The holiday stays booked until the office approves it.'
+          : row.status === 'pending'
+            ? 'Holiday withdrawn.'
+            : 'Holiday cancelled.',
+      );
+      await load();
+    } catch (err) {
+      setMessage(err instanceof Error ? err.message : 'Request failed.');
+    } finally {
+      setRowBusy(null);
     }
   }
 
@@ -211,19 +288,57 @@ export default function LeaveScreen() {
 
         return (
           <View key={row.id} style={styles.booked}>
-            <View style={styles.flex}>
-              <Text numberOfLines={1} style={styles.bookedWhen}>
-                {prettyDate(row.starts_on)}
-                {row.starts_on === row.ends_on ? '' : ` – ${prettyDate(row.ends_on)}`}
-                {' · '}
-                {booked} day{booked === 1 ? '' : 's'}
-              </Text>
-              <Text numberOfLines={1} style={styles.bookedMeta}>
-                {kindLabel(row.kind)}
-                {row.reason ? ` · ${row.reason}` : ''}
-              </Text>
+            <View style={styles.bookedRow}>
+              <View style={styles.flex}>
+                <Text numberOfLines={1} style={styles.bookedWhen}>
+                  {prettyDate(row.starts_on)}
+                  {row.starts_on === row.ends_on ? '' : ` – ${prettyDate(row.ends_on)}`}
+                  {' · '}
+                  {booked} day{booked === 1 ? '' : 's'}
+                </Text>
+                <Text numberOfLines={1} style={styles.bookedMeta}>
+                  {kindLabel(row.kind)}
+                  {row.reason ? ` · ${row.reason}` : ''}
+                </Text>
+              </View>
+              <Pill label={statusLabel(row.status)} tone={statusTone(row.status)} />
             </View>
-            <Pill label={row.status} tone={row.status === 'approved' ? 'accent' : row.status === 'rejected' ? 'warn' : 'blue'} />
+            {row.status === 'cancel_requested' ? <Meta>Stays booked until the office approves the cancellation.</Meta> : null}
+            {row.status === 'pending' ? (
+              <Button
+                disabled={rowBusy === row.id}
+                label={rowBusy === row.id ? 'Withdrawing…' : 'Withdraw'}
+                onPress={() => cancel(row, false)}
+                tone="ghost"
+              />
+            ) : null}
+            {row.status === 'approved' && (row.kind ?? 'holiday') === 'holiday' && cancellingId !== row.id ? (
+              <Button
+                label="Ask to cancel"
+                onPress={() => {
+                  setCancellingId(row.id);
+                  setCancelReason('');
+                }}
+                tone="ghost"
+              />
+            ) : null}
+            {cancellingId === row.id ? (
+              <View style={styles.cancelBox}>
+                <TextInput
+                  onChangeText={setCancelReason}
+                  placeholder="Why should this holiday be cancelled?"
+                  placeholderTextColor={colors.muted}
+                  style={styles.input}
+                  value={cancelReason}
+                />
+                <Button
+                  disabled={rowBusy === row.id}
+                  label={rowBusy === row.id ? 'Sending…' : 'Send cancellation'}
+                  onPress={() => cancel(row, true)}
+                />
+                <Button label="Keep holiday" onPress={() => setCancellingId(null)} tone="ghost" />
+              </View>
+            ) : null}
           </View>
         );
       })}
@@ -249,7 +364,9 @@ const styles = StyleSheet.create({
   cellOnText: { color: '#fff' },
   hint: { color: colors.muted, fontFamily: font.regular, fontSize: 12 },
   bookedTitle: { color: colors.muted, fontFamily: font.bold, fontSize: 12, marginTop: 4 },
-  booked: { flexDirection: 'row', alignItems: 'center', gap: 8, paddingVertical: 6, borderBottomWidth: 1, borderBottomColor: colors.line },
+  booked: { gap: 8, paddingVertical: 8, borderBottomWidth: 1, borderBottomColor: colors.line },
+  bookedRow: { flexDirection: 'row', alignItems: 'center', gap: 8 },
+  cancelBox: { gap: 8 },
   bookedWhen: { color: colors.ink, fontFamily: font.semibold, fontSize: 13 },
   bookedMeta: { color: colors.muted, fontFamily: font.regular, fontSize: 12 },
   label: { color: colors.muted },
