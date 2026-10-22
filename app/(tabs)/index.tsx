@@ -1,3 +1,4 @@
+import DateTimePicker from '@react-native-community/datetimepicker';
 import { useFocusEffect, useRouter } from 'expo-router';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { Linking, Pressable, StyleSheet, Text, View } from 'react-native';
@@ -40,11 +41,24 @@ type Today = {
 
 type OfficePrompt = { action: 'clock_in' | 'clock_out'; message: string; office_name: string };
 
+type VisitChoice = { visit_id: number | null; ticket_id: number | null; label: string };
+
+type VisitPrompt = {
+  id: number;
+  kind: 'arrived' | 'office' | 'gap' | 'return';
+  message: string;
+  stopped_at: string | null;
+  arrived_at: string | null;
+  choices: VisitChoice[];
+};
+
 type Me = {
   name: string;
   unread_alerts?: number;
   at_office?: boolean;
   office_prompt?: OfficePrompt | null;
+  visit_prompt?: VisitPrompt | null;
+  visit_notice?: string | null;
   callout: { id: number; phase: string; ticket_id: number | null; started_at: string | null; arrived_at: string | null } | null;
 };
 
@@ -56,6 +70,9 @@ export default function TodayScreen() {
   const [refreshing, setRefreshing] = useState(false);
   const [busy, setBusy] = useState(false);
   const [workplace, setWorkplace] = useState<'office' | 'home'>('office');
+  const [leftAt, setLeftAt] = useState(() => new Date());
+  const [backAt, setBackAt] = useState(() => new Date());
+  const [picking, setPicking] = useState<'left' | 'back' | null>(null);
   const ticking = Boolean(today?.shift || me?.callout);
   const now = useNow(ticking);
   const phaseRef = useRef<string | null>(null);
@@ -73,6 +90,17 @@ export default function TodayScreen() {
       startOfficeWatch().catch(() => undefined);
     }
   }, []);
+
+  useEffect(() => {
+    const prompt = me?.visit_prompt;
+
+    if (!prompt) {
+      return;
+    }
+
+    setLeftAt(prompt.arrived_at ? new Date(prompt.arrived_at) : new Date());
+    setBackAt(new Date());
+  }, [me?.visit_prompt?.id]);
 
   useEffect(() => {
     return subscribeShiftFix((phase, officePrompt) => {
@@ -123,6 +151,22 @@ export default function TodayScreen() {
     }
   }
 
+  async function answerVisit(body: Record<string, unknown>) {
+    setBusy(true);
+    setMessage(null);
+
+    try {
+      const profile = await api<Me>('/mobile/visit-prompt', { method: 'POST', body });
+      setMe(profile);
+      setMessage(profile.visit_notice ?? 'Saved.');
+      await load();
+    } catch (err) {
+      setMessage(err instanceof Error ? err.message : 'Could not save that.');
+    } finally {
+      setBusy(false);
+    }
+  }
+
   async function answerPrompt(decision: 'confirm' | 'dismiss') {
     if (!me?.office_prompt) {
       return;
@@ -143,7 +187,9 @@ export default function TodayScreen() {
   }
 
   const first = me?.name?.split(' ')[0] ?? 'there';
-  const calloutSince = me?.callout?.phase === 'on_site' ? me.callout.arrived_at ?? me.callout.started_at : me?.callout?.started_at;
+  const calloutPhase = me?.callout?.phase;
+  const calloutSince = calloutPhase === 'on_site' ? me?.callout?.arrived_at ?? me?.callout?.started_at : calloutPhase === 'return' ? me?.callout?.started_at : me?.callout?.started_at;
+  const calloutLabel = calloutPhase === 'on_site' ? 'On site' : calloutPhase === 'return' ? 'Driving back' : calloutPhase === 'held' ? 'Needs times' : 'On the way';
 
   return (
     <Screen
@@ -161,6 +207,74 @@ export default function TodayScreen() {
         </BrandHeader>
       }
     >
+
+      {me?.visit_notice ? <Notice>{me.visit_notice}</Notice> : null}
+
+      {me?.visit_prompt ? (
+        <Card accent={colors.green}>
+          <Text style={styles.strong}>{me.visit_prompt.message}</Text>
+          {me.visit_prompt.kind === 'arrived' ? (
+            <View style={styles.stack}>
+              {me.visit_prompt.choices.map((choice) => (
+                <Button
+                  disabled={busy}
+                  key={`${choice.visit_id ?? 't'}-${choice.ticket_id ?? 'v'}`}
+                  label={me.visit_prompt?.choices.length === 1 ? `Yes, ${choice.label}` : choice.label}
+                  onPress={() => answerVisit({ decision: 'yes', visit_id: choice.visit_id, ticket_id: choice.ticket_id })}
+                />
+              ))}
+              <Button disabled={busy} label="Not a job" onPress={() => answerVisit({ decision: 'not_a_job' })} tone="ghost" />
+            </View>
+          ) : null}
+          {me.visit_prompt.kind === 'office' ? (
+            <View style={styles.row}>
+              <View style={styles.flex}>
+                <Button disabled={busy} label="Yes" onPress={() => answerVisit({ decision: 'office' })} />
+              </View>
+              <View style={styles.flex}>
+                <Button disabled={busy} label="Not yet" onPress={() => answerVisit({ decision: 'not_a_job' })} tone="ghost" />
+              </View>
+            </View>
+          ) : null}
+          {me.visit_prompt.kind === 'gap' || me.visit_prompt.kind === 'return' ? (
+            <View style={styles.stack}>
+              {me.visit_prompt.kind === 'gap' ? (
+                <Pressable onPress={() => setPicking('left')}>
+                  <Text style={styles.link}>Left the customer · {leftAt.toLocaleString()}</Text>
+                </Pressable>
+              ) : null}
+              <Pressable onPress={() => setPicking('back')}>
+                <Text style={styles.link}>Back at the office · {backAt.toLocaleString()}</Text>
+              </Pressable>
+              {picking ? (
+                <DateTimePicker
+                  mode="datetime"
+                  value={picking === 'left' ? leftAt : backAt}
+                  onChange={(_event, date) => {
+                    setPicking(null);
+                    if (!date) {
+                      return;
+                    }
+                    if (picking === 'left') {
+                      setLeftAt(date);
+                    } else {
+                      setBackAt(date);
+                    }
+                  }}
+                />
+              ) : null}
+              <Button
+                disabled={busy}
+                label="Save times"
+                onPress={() => answerVisit(me.visit_prompt?.kind === 'gap'
+                  ? { decision: 'times', left_at: leftAt.toISOString(), back_at: backAt.toISOString() }
+                  : { decision: 'return', back_at: backAt.toISOString() })}
+              />
+              <Button disabled={busy} label="I already logged this" onPress={() => answerVisit({ decision: 'already_logged' })} tone="ghost" />
+            </View>
+          ) : null}
+        </Card>
+      ) : null}
 
       {me?.office_prompt ? (
         <Card accent={colors.green}>
@@ -219,13 +333,17 @@ export default function TodayScreen() {
       {me?.callout ? (
         <Card accent={me.callout.phase === 'on_site' ? colors.green : colors.blue}>
           <View style={styles.row}>
-            <Pill label={me.callout.phase === 'on_site' ? 'On site' : 'On the way'} tone={me.callout.phase === 'on_site' ? 'accent' : 'blue'} />
-            <Text style={styles.clock}>{elapsed(calloutSince, now)}</Text>
+            <Pill label={calloutLabel} tone={me.callout.phase === 'on_site' ? 'accent' : 'blue'} />
+            {calloutPhase === 'held' ? null : <Text style={styles.clock}>{elapsed(calloutSince, now)}</Text>}
           </View>
           <Meta>
-            {me.callout.phase === 'travel'
-              ? 'On the way. Arriving at the site switches this to time on site.'
-              : 'On site. Leaving logs the travel and the time on site against the job.'}
+            {me.callout.phase === 'return'
+              ? 'Driving back. Reaching the office logs this drive on the job.'
+              : me.callout.phase === 'held'
+                ? 'The phone was off, so this visit is waiting for the times above.'
+                : me.callout.phase === 'travel'
+                  ? 'On the way. Arriving at the site switches this to time on site.'
+                  : 'On site. Leaving starts the drive back, which stays on this job if it is the last one.'}
           </Meta>
           {me.callout.ticket_id ? (
             <Pressable onPress={() => router.push(`/job/${me.callout?.ticket_id}`)}>
@@ -267,7 +385,7 @@ export default function TodayScreen() {
       {(today?.visits.length ?? 0) === 0 ? (
         <View style={styles.empty}>
           <EmptyDay />
-          <Meta>No visits booked. Arriving at a job site starts one.</Meta>
+          <Meta>No visits booked. A stop of about 10 minutes asks if you have arrived.</Meta>
         </View>
       ) : null}
 
@@ -310,6 +428,7 @@ const styles = StyleSheet.create({
   time: { color: colors.muted, fontWeight: '700' },
   clock: { fontVariant: ['tabular-nums'], fontWeight: '800', color: colors.ink, fontSize: 18 },
   link: { color: colors.accent, fontWeight: '700' },
+  stack: { gap: 8, marginTop: 8 },
   places: { flexDirection: 'row', gap: 8, marginTop: 10 },
   place: {
     borderWidth: 1,

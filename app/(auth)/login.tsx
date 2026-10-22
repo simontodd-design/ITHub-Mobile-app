@@ -1,4 +1,5 @@
 import { useRouter } from 'expo-router';
+import * as WebBrowser from 'expo-web-browser';
 import { useState } from 'react';
 import { Image, Pressable, StyleSheet, Text, TextInput, View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
@@ -6,12 +7,48 @@ import { api } from '@/api';
 import { setToken } from '@/session';
 import { colors, font } from '@/theme';
 
+WebBrowser.maybeCompleteAuthSession();
+
 export default function LoginScreen() {
   const router = useRouter();
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+
+  async function microsoft() {
+    setBusy(true);
+    setError(null);
+
+    try {
+      const start = await api<{ url: string }>('/mobile/microsoft/start', { method: 'POST' });
+      const result = await WebBrowser.openAuthSessionAsync(start.url, 'ithub://auth/microsoft');
+
+      if (result.type !== 'success') {
+        setError(result.type === 'cancel' ? 'Microsoft sign-in was cancelled.' : 'Microsoft sign-in did not finish.');
+        return;
+      }
+
+      const code = result.url.match(/[?&]code=([^&]+)/)?.[1];
+      const failure = result.url.match(/[?&]error=([^&]+)/)?.[1];
+
+      if (!code) {
+        setError(failure ? decodeURIComponent(failure.replace(/\+/g, ' ')) : 'Microsoft sign-in did not finish.');
+        return;
+      }
+
+      const session = await api<{ token: string }>('/mobile/microsoft/exchange', {
+        method: 'POST',
+        body: { code: decodeURIComponent(code), device_name: 'IT Hub phone' },
+      });
+      await setToken(session.token);
+      router.replace('/');
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Microsoft sign-in failed.');
+    } finally {
+      setBusy(false);
+    }
+  }
 
   async function submit() {
     setBusy(true);
@@ -61,6 +98,9 @@ export default function LoginScreen() {
         <Pressable style={styles.button} disabled={busy} onPress={submit}>
           <Text style={styles.buttonText}>{busy ? 'Signing in…' : 'Sign in'}</Text>
         </Pressable>
+        <Pressable style={styles.microsoft} disabled={busy} onPress={microsoft}>
+          <Text style={styles.microsoftText}>Sign in with Microsoft</Text>
+        </Pressable>
       </View>
     </SafeAreaView>
   );
@@ -92,5 +132,14 @@ const styles = StyleSheet.create({
   },
   button: { backgroundColor: colors.greenDark, borderRadius: 14, padding: 16, alignItems: 'center', marginTop: 8 },
   buttonText: { color: '#fff', fontFamily: font.bold, fontSize: 16 },
+  microsoft: {
+    borderRadius: 14,
+    padding: 16,
+    alignItems: 'center',
+    borderWidth: 1,
+    borderColor: colors.line,
+    backgroundColor: colors.card,
+  },
+  microsoftText: { color: colors.ink, fontFamily: font.bold, fontSize: 16 },
   error: { color: colors.danger, fontFamily: font.medium },
 });

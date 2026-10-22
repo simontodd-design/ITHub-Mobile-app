@@ -94,7 +94,7 @@ export default function AlertsScreen() {
 
   return (
     <Screen onRefresh={load} header={<BrandHeader eyebrow="While you are out" title="Alerts" />}>
-      <Meta>Urgent tickets, Fast Track, new jobs, and stock moves.</Meta>
+      <Meta>Your jobs, clocking at the office, and your own leave.</Meta>
       <Pressable onPress={enablePush}>
         <Text style={styles.link}>Allow push while the app is closed</Text>
       </Pressable>

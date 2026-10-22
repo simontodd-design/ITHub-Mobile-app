@@ -10,7 +10,7 @@ const MODE_KEY = 'ithub.location.mode';
 type TrackMode = 'shift' | 'office' | 'off';
 type TaskBody = { locations?: Location.LocationObject[] };
 type OfficePrompt = { action: 'clock_in' | 'clock_out'; message: string; office_name: string } | null;
-type FixResult = { callout?: { phase?: string | null } | null; office_prompt?: OfficePrompt };
+type FixResult = { callout?: { phase?: string | null } | null; office_prompt?: OfficePrompt; visit_prompt?: unknown };
 type MobileConfig = {
   tracking_enabled: boolean;
   office_watch: boolean;
@@ -72,7 +72,7 @@ async function publishFix(fix: Location.LocationObject): Promise<void> {
   try {
     const result = await api<FixResult>(mode === 'shift' ? '/mobile/location' : '/mobile/presence', { method: 'POST', body });
     const phase = result.callout?.phase ?? null;
-    fixListeners.forEach((listener) => listener(phase, Boolean(result.office_prompt)));
+    fixListeners.forEach((listener) => listener(phase, Boolean(result.office_prompt) || Boolean(result.visit_prompt)));
   } catch {
     if (mode === 'shift') {
       await enqueue({ client_id: clientId('loc'), type: 'location', ...body });

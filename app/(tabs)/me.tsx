@@ -122,7 +122,7 @@ export default function MeScreen() {
       </Card>
       <Card>
         <Text style={styles.line}>Callout mode</Text>
-        <Meta>{me?.callout ? `On — ${me.callout.phase === 'on_site' ? 'on site' : 'travel'} timer running` : 'Travel, then on site, when you start a callout'}</Meta>
+        <Meta>{me?.callout ? `On — ${me.callout.phase === 'on_site' ? 'on site' : me.callout.phase === 'return' ? 'driving back' : me.callout.phase === 'held' ? 'waiting for times' : 'travel'}` : 'A stop of about 10 minutes asks if you have arrived'}</Meta>
       </Card>
       <Card>
         <Text style={styles.line}>
