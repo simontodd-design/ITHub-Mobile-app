@@ -8,15 +8,25 @@ import { useFonts } from 'expo-font';
 import { Stack, useRouter, useSegments } from 'expo-router';
 import { useEffect, useRef, useState } from 'react';
 import { StatusBar } from 'expo-status-bar';
-import { ActivityIndicator, BackHandler, View } from 'react-native';
+import { ActivityIndicator, BackHandler, Platform, View } from 'react-native';
+import { api, appVersion } from '@/api';
 import { registerPush } from '@/push';
 import { getToken } from '@/session';
 import { colors } from '@/theme';
+import { UpdateRequired } from '@/UpdateRequired';
 import '@/location';
+
+type VersionCheck = {
+  update_required: boolean;
+  message: string;
+  ios_url: string | null;
+  portal_url: string | null;
+};
 
 export default function RootLayout() {
   const [ready, setReady] = useState(false);
   const [signedIn, setSignedIn] = useState(false);
+  const [update, setUpdate] = useState<VersionCheck | null>(null);
   const segments = useSegments();
   const router = useRouter();
   const pushStarted = useRef(false);
@@ -26,6 +36,20 @@ export default function RootLayout() {
     InstrumentSans_600SemiBold,
     InstrumentSans_700Bold,
   });
+
+  useEffect(() => {
+    const platform = Platform.OS === 'ios' ? 'ios' : 'android';
+    api<VersionCheck>(
+      `/mobile/version?platform=${platform}&version=${encodeURIComponent(appVersion())}`,
+      { ignoreOffline: true },
+    )
+      .then((payload) => {
+        if (payload.update_required) {
+          setUpdate(payload);
+        }
+      })
+      .catch(() => undefined);
+  }, []);
 
   useEffect(() => {
     getToken().then((token) => {
@@ -66,6 +90,12 @@ export default function RootLayout() {
       registerPush().catch(() => undefined);
     }
   }, [ready, signedIn, segments, router]);
+
+  if (update?.update_required) {
+    return (
+      <UpdateRequired message={update.message} iosUrl={update.ios_url} portalUrl={update.portal_url} />
+    );
+  }
 
   if (!ready) {
     return (

@@ -13,6 +13,7 @@ type Taken = {
   id: number;
   name: string | null;
   part_number?: string | null;
+  barcode?: string | null;
   quantity: number;
   held?: boolean;
   is_serialised?: boolean;
@@ -43,7 +44,20 @@ type CatalogueSerial = {
   id: number;
   serial_number: string;
   location: string | null;
+  purchased_on?: string | null;
 };
+
+function purchaseLabel(value: string): string {
+  const [year, month, date] = value.slice(0, 10).split('-');
+  const names = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+  const name = names[Number(month) - 1];
+
+  if (!year || !name || !date) {
+    return value;
+  }
+
+  return `${Number(date)} ${name} ${year}`;
+}
 
 type JobOption = {
   id: number;
@@ -235,7 +249,15 @@ export default function ScanScreen() {
       return line.quantity > 1 ? `Scan ${line.quantity} serials` : 'Scan a serial';
     }
 
+    if (!line.barcode) {
+      return 'Confirm it on the phone';
+    }
+
     return 'Scan the barcode';
+  }
+
+  function needsConfirm(line: Taken): boolean {
+    return !line.is_serialised && !line.serial && !line.barcode;
   }
 
   function choose(job: JobOption) {
@@ -300,32 +322,20 @@ export default function ScanScreen() {
       return;
     }
 
-    if (product.is_serialised) {
-      setAddingBusy(true);
-      setCatalogueError(null);
-      setSerialQuery('');
-
-      try {
-        const payload = await api<{ serials: CatalogueSerial[] }>(`/mobile/products/${product.id}/serials`);
-        setSerialProduct(product);
-        setSerials(payload.serials);
-      } catch (err) {
-        setCatalogueError(err instanceof Error ? err.message : 'Could not load serials.');
-      } finally {
-        setAddingBusy(false);
-      }
-
+    if (!product.barcode) {
+      setCatalogueError(
+        product.is_serialised
+          ? 'Hold this on the portal first, then scan the serial.'
+          : 'Hold this on the portal first. It has no barcode to scan.',
+      );
       return;
     }
 
-    const code = product.barcode || product.part_number;
-
-    if (!code) {
-      setCatalogueError('This part has no barcode.');
-      return;
-    }
-
-    await addByCode(code);
+    setCatalogueError(
+      product.is_serialised
+        ? 'Scan the barcode, then the serial.'
+        : 'Scan the barcode on this part.',
+    );
   }
 
   async function addByCode(code: string) {
@@ -367,6 +377,31 @@ export default function ScanScreen() {
       }
 
       setCatalogueError(err instanceof Error ? err.message : 'Could not add that part.');
+    } finally {
+      setAddingBusy(false);
+    }
+  }
+
+  async function confirmLine(line: Taken, returning: boolean) {
+    const ticket = ticketRef.current;
+
+    if (!ticket || addingBusy) {
+      return;
+    }
+
+    setAddingBusy(true);
+    setMessage(null);
+
+    try {
+      const result = await api<ScanResult>(
+        `/mobile/tickets/${ticket}/basket/${line.id}/${returning ? 'return' : 'issue'}`,
+        { method: 'POST' },
+      );
+      const name = result.product?.name ?? line.name ?? 'Part';
+      setTaken(result.taken ?? []);
+      setMessage(returning ? `${name} is back in the store.` : `${name} is on this job.`);
+    } catch (err) {
+      setMessage(err instanceof Error ? err.message : 'Could not update that part.');
     } finally {
       setAddingBusy(false);
     }
@@ -513,7 +548,11 @@ export default function ScanScreen() {
                 <Pressable disabled={addingBusy} onPress={() => addByCode(item.serial_number)} style={styles.row}>
                   <View style={styles.copy}>
                     <Text numberOfLines={1} style={styles.rowSubject}>{item.serial_number}</Text>
-                    {item.location ? <Text style={styles.ticketMeta}>{item.location}</Text> : null}
+                    {item.purchased_on || item.location ? (
+                      <Text style={styles.ticketMeta}>
+                        {[item.purchased_on ? purchaseLabel(item.purchased_on) : null, item.location].filter(Boolean).join(' · ')}
+                      </Text>
+                    ) : null}
                   </View>
                 </Pressable>
               )}
@@ -635,7 +674,11 @@ export default function ScanScreen() {
                     : 'Nothing is held for this job. Scan a barcode to put a part on it.'}
                 </Meta>
               ) : (
-                <Meta>Scan each one. Any other barcode still goes on this job.</Meta>
+                <Meta>
+                  {waiting.some(needsConfirm)
+                    ? 'Confirm a part with no barcode. Scan the serial on anything that has one.'
+                    : 'Scan each one. Any other barcode still goes on this job.'}
+                </Meta>
               )}
               {waiting.map((line, index) => {
                 const where = placeLabel(line);
@@ -655,6 +698,11 @@ export default function ScanScreen() {
                         {scanHint(line)}
                         {line.part_number ? ` · ${line.part_number}` : ''}
                       </Text>
+                      {needsConfirm(line) ? (
+                        <Pressable disabled={addingBusy} onPress={() => confirmLine(line, false)}>
+                          <Text style={styles.change}>Scan out</Text>
+                        </Pressable>
+                      ) : null}
                     </View>
                   </View>
                 );
@@ -681,7 +729,11 @@ export default function ScanScreen() {
                   <Text style={styles.change}>Done</Text>
                 </Pressable>
               </View>
-              <Meta>Scan the barcode, or the serial if it has one.</Meta>
+              <Meta>
+                {scanned.some(needsConfirm)
+                  ? 'Confirm a part with no barcode to put it back. Scan the serial on anything that has one.'
+                  : 'Scan the barcode, or the serial if it has one.'}
+              </Meta>
               {scanned.length === 0 ? <Meta>Nothing on this job to put back.</Meta> : null}
               {scanned.map((line) => (
                 <View key={line.id} style={styles.done}>
@@ -689,6 +741,11 @@ export default function ScanScreen() {
                     {line.name ?? 'Part'}
                   </Text>
                   <Text style={styles.qty}>× {line.quantity}</Text>
+                  {needsConfirm(line) ? (
+                    <Pressable disabled={addingBusy} onPress={() => confirmLine(line, true)}>
+                      <Text style={styles.change}>Put back</Text>
+                    </Pressable>
+                  ) : null}
                 </View>
               ))}
             </>
