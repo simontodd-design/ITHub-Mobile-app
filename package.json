@@ -1,6 +1,6 @@
 {
   "name": "ithub-mobile",
-  "version": "1.0.4",
+  "version": "1.0.5",
   "private": true,
   "description": "IT Hub engineer app — iOS and Android client for the SMS",
   "main": "expo-router/entry",

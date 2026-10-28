@@ -40,25 +40,6 @@ type CatalogueProduct = {
   free: number;
 };
 
-type CatalogueSerial = {
-  id: number;
-  serial_number: string;
-  location: string | null;
-  purchased_on?: string | null;
-};
-
-function purchaseLabel(value: string): string {
-  const [year, month, date] = value.slice(0, 10).split('-');
-  const names = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
-  const name = names[Number(month) - 1];
-
-  if (!year || !name || !date) {
-    return value;
-  }
-
-  return `${Number(date)} ${name} ${year}`;
-}
-
 type JobOption = {
   id: number;
   subject: string;
@@ -84,9 +65,6 @@ export default function ScanScreen() {
   const [adding, setAdding] = useState(false);
   const [productQuery, setProductQuery] = useState('');
   const [products, setProducts] = useState<CatalogueProduct[]>([]);
-  const [serialProduct, setSerialProduct] = useState<CatalogueProduct | null>(null);
-  const [serials, setSerials] = useState<CatalogueSerial[]>([]);
-  const [serialQuery, setSerialQuery] = useState('');
   const [catalogueError, setCatalogueError] = useState<string | null>(null);
   const [addingBusy, setAddingBusy] = useState(false);
   const lastHit = useRef({ code: '', at: 0 });
@@ -286,21 +264,17 @@ export default function ScanScreen() {
     setAdding(false);
     setProductQuery('');
     setProducts([]);
-    setSerialProduct(null);
-    setSerials([]);
-    setSerialQuery('');
     setCatalogueError(null);
     setAddingBusy(false);
   }
 
   function openCatalogue() {
     setCatalogueError(null);
-    setSerialProduct(null);
     setAdding(true);
   }
 
   useEffect(() => {
-    if (!adding || serialProduct) {
+    if (!adding) {
       return;
     }
 
@@ -315,33 +289,30 @@ export default function ScanScreen() {
     }, 200);
 
     return () => clearTimeout(handle);
-  }, [adding, productQuery, serialProduct]);
+  }, [adding, productQuery]);
 
   async function chooseProduct(product: CatalogueProduct) {
     if (addingBusy) {
       return;
     }
 
-    if (!product.barcode) {
-      setCatalogueError(
-        product.is_serialised
-          ? 'Hold this on the portal first, then scan the serial.'
-          : 'Hold this on the portal first. It has no barcode to scan.',
-      );
+    if (product.is_serialised) {
+      const next = { id: product.id, name: product.name };
+      pendingRef.current = next;
+      setPending(next);
+      setMessage(`Scan the serial on ${product.name}.`);
+      closeCatalogue();
       return;
     }
 
-    setCatalogueError(
-      product.is_serialised
-        ? 'Scan the barcode, then the serial.'
-        : 'Scan the barcode on this part.',
-    );
-  }
+    if (product.barcode) {
+      setCatalogueError('Scan the barcode on this part.');
+      return;
+    }
 
-  async function addByCode(code: string) {
     const ticket = ticketRef.current;
 
-    if (!ticket || addingBusy) {
+    if (!ticket) {
       return;
     }
 
@@ -349,33 +320,14 @@ export default function ScanScreen() {
     setCatalogueError(null);
 
     try {
-      const result = await api<ScanResult>(`/mobile/tickets/${ticket}/basket/scan`, {
+      const result = await api<ScanResult>(`/mobile/tickets/${ticket}/basket/add`, {
         method: 'POST',
-        body: { barcode: code, quantity: 1 },
+        body: { product_id: product.id, quantity: 1 },
       });
-
-      if (result.needs_serial) {
-        setCatalogueError('Choose a serial for this part.');
-        return;
-      }
-
       setTaken(result.taken ?? []);
-      setMessage(`${result.product?.name ?? 'Part'} is on this job.`);
+      setMessage(`${product.name} is on this job.`);
       closeCatalogue();
     } catch (err) {
-      if (ticket && !(err instanceof ApiError && err.status >= 400 && err.status < 500)) {
-        await enqueue({
-          client_id: clientId('scan'),
-          type: 'scan',
-          ticket_id: Number(ticket),
-          barcode: code,
-          quantity: 1,
-        });
-        setMessage('Saved on the phone. It will sync when the signal returns.');
-        closeCatalogue();
-        return;
-      }
-
       setCatalogueError(err instanceof Error ? err.message : 'Could not add that part.');
     } finally {
       setAddingBusy(false);
@@ -509,74 +461,42 @@ export default function ScanScreen() {
     : 'Parts for this job';
 
   if (adding) {
-    const shownSerials = serials.filter((serial) => {
-      const needle = serialQuery.trim().toLowerCase();
-
-      if (!needle) {
-        return true;
-      }
-
-      return [serial.serial_number, serial.location].filter(Boolean).join(' ').toLowerCase().includes(needle);
-    });
-
     return (
       <Screen scroll={false} header={<BrandHeader eyebrow="Hardware" title="Scan" />}>
         <View style={styles.picker}>
           <View style={styles.catalogueHead}>
-            <Text style={styles.lead}>{serialProduct ? serialProduct.name : 'Add a part'}</Text>
-            <Pressable onPress={serialProduct ? () => { setSerialProduct(null); setCatalogueError(null); } : closeCatalogue}>
-              <Text style={styles.change}>{serialProduct ? 'Back' : 'Close'}</Text>
+            <Text style={styles.lead}>Add a part</Text>
+            <Pressable onPress={closeCatalogue}>
+              <Text style={styles.change}>Close</Text>
             </Pressable>
           </View>
           <TextInput
             autoFocus
-            onChangeText={serialProduct ? setSerialQuery : setProductQuery}
-            placeholder={serialProduct ? 'Search serial or location' : 'Search name, part number, or barcode'}
+            onChangeText={setProductQuery}
+            placeholder="Search name, part number, or barcode"
             placeholderTextColor={colors.muted}
             style={styles.search}
-            value={serialProduct ? serialQuery : productQuery}
+            value={productQuery}
           />
           {catalogueError ? <View style={styles.catalogueNote}><Notice>{catalogueError}</Notice></View> : null}
-          {serialProduct ? (
-            <FlatList
-              data={shownSerials}
-              keyboardShouldPersistTaps="handled"
-              keyExtractor={(serial) => String(serial.id)}
-              contentContainerStyle={styles.pickerList}
-              ListEmptyComponent={<Meta>{addingBusy ? 'Loading serials…' : 'No serials in stock.'}</Meta>}
-              renderItem={({ item }) => (
-                <Pressable disabled={addingBusy} onPress={() => addByCode(item.serial_number)} style={styles.row}>
-                  <View style={styles.copy}>
-                    <Text numberOfLines={1} style={styles.rowSubject}>{item.serial_number}</Text>
-                    {item.purchased_on || item.location ? (
-                      <Text style={styles.ticketMeta}>
-                        {[item.purchased_on ? purchaseLabel(item.purchased_on) : null, item.location].filter(Boolean).join(' · ')}
-                      </Text>
-                    ) : null}
-                  </View>
-                </Pressable>
-              )}
-            />
-          ) : (
-            <FlatList
-              data={products}
-              keyboardShouldPersistTaps="handled"
-              keyExtractor={(product) => String(product.id)}
-              contentContainerStyle={styles.pickerList}
-              ListEmptyComponent={<Meta>{catalogueError ? ' ' : 'No parts match that search.'}</Meta>}
-              renderItem={({ item }) => (
-                <Pressable disabled={addingBusy} onPress={() => chooseProduct(item)} style={styles.row}>
-                  <View style={styles.copy}>
-                    <Text numberOfLines={2} style={styles.rowSubject}>{item.name}</Text>
-                    <Text numberOfLines={1} style={styles.ticketMeta}>
-                      {item.part_number ?? 'No part number'}
-                      {item.is_serialised ? ' · Choose a serial' : item.free > 0 ? ` · ${item.free} in stock` : ''}
-                    </Text>
-                  </View>
-                </Pressable>
-              )}
-            />
-          )}
+          <FlatList
+            data={products}
+            keyboardShouldPersistTaps="handled"
+            keyExtractor={(product) => String(product.id)}
+            contentContainerStyle={styles.pickerList}
+            ListEmptyComponent={<Meta>{catalogueError ? ' ' : 'No parts match that search.'}</Meta>}
+            renderItem={({ item }) => (
+              <Pressable disabled={addingBusy} onPress={() => chooseProduct(item)} style={styles.row}>
+                <View style={styles.copy}>
+                  <Text numberOfLines={2} style={styles.rowSubject}>{item.name}</Text>
+                  <Text numberOfLines={1} style={styles.ticketMeta}>
+                    {item.part_number ?? 'No part number'}
+                    {item.is_serialised ? ' · Scan the serial' : item.barcode ? ' · Scan the barcode' : item.free > 0 ? ` · ${item.free} in stock` : ''}
+                  </Text>
+                </View>
+              </Pressable>
+            )}
+          />
         </View>
       </Screen>
     );
@@ -670,14 +590,14 @@ export default function ScanScreen() {
               {waiting.length === 0 ? (
                 <Meta>
                   {taken.length > 0
-                    ? 'Scan any other barcode and it goes on this job.'
-                    : 'Nothing is held for this job. Scan a barcode to put a part on it.'}
+                    ? 'Scan any other barcode, or add a part that has no barcode.'
+                    : 'Nothing is held for this job. Scan a barcode, or add a part that has no barcode.'}
                 </Meta>
               ) : (
                 <Meta>
                   {waiting.some(needsConfirm)
                     ? 'Confirm a part with no barcode. Scan the serial on anything that has one.'
-                    : 'Scan each one. Any other barcode still goes on this job.'}
+                    : 'Scan each one. A part with no barcode can be added by hand.'}
                 </Meta>
               )}
               {waiting.map((line, index) => {
