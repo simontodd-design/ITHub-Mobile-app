@@ -11,6 +11,7 @@ import { StatusBar } from 'expo-status-bar';
 import { ActivityIndicator, BackHandler, Platform, View } from 'react-native';
 import { api, appVersion } from '@/api';
 import { registerPush } from '@/push';
+import { StillWorking } from '@/StillWorking';
 import { getToken } from '@/session';
 import { colors } from '@/theme';
 import { UpdateRequired } from '@/UpdateRequired';
@@ -108,6 +109,7 @@ export default function RootLayout() {
   return (
     <>
       <StatusBar style="light" backgroundColor={colors.side} />
+      {signedIn ? <StillWorking /> : null}
       <Stack screenOptions={{ headerShown: false, gestureEnabled: true }}>
         <Stack.Screen name="(tabs)" options={{ gestureEnabled: false }} />
       </Stack>
