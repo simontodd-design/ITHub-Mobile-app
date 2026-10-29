@@ -1,7 +1,7 @@
 import DateTimePicker from '@react-native-community/datetimepicker';
 import { useFocusEffect, useRouter } from 'expo-router';
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { Linking, Pressable, StyleSheet, Text, View } from 'react-native';
+import { Alert, Linking, Pressable, StyleSheet, Text, View } from 'react-native';
 import { api } from '@/api';
 import { clock, elapsed, greeting, mapsUrl } from '@/format';
 import { answerOfficePrompt, startOfficeWatch, startShiftTracking, subscribeShiftFix } from '@/location';
@@ -128,7 +128,25 @@ export default function TodayScreen() {
     }
   }
 
+  function confirmClockOut(): Promise<boolean> {
+    return new Promise((resolve) => {
+      Alert.alert(
+        'Clock out?',
+        'This ends the shift. You stay clocked in until you confirm.',
+        [
+          { text: 'Cancel', style: 'cancel', onPress: () => resolve(false) },
+          { text: 'Clock out', style: 'destructive', onPress: () => resolve(true) },
+        ],
+        { cancelable: true, onDismiss: () => resolve(false) },
+      );
+    });
+  }
+
   async function toggleShift(inShift: boolean) {
+    if (!inShift && !(await confirmClockOut())) {
+      return;
+    }
+
     setBusy(true);
     setMessage(null);
 
