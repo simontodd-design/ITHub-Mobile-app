@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import { Modal, StyleSheet, Text, View } from 'react-native';
 import { api } from '@/api';
+import { syncTracking } from '@/location';
 import { getToken } from '@/session';
 import { colors, font } from '@/theme';
 import { Button } from '@/ui';
@@ -30,10 +31,11 @@ export function StillWorking() {
       }
 
       try {
-        const me = await api<{ still_working?: Prompt | null }>('/mobile/me');
+        const me = await api<{ still_working?: Prompt | null; clocked_in?: boolean }>('/mobile/me');
 
         if (!stop) {
           setPrompt(me.still_working ?? null);
+          syncTracking(Boolean(me.clocked_in)).catch(() => undefined);
         }
       } catch {
         // Keep the prompt on screen if this check fails.

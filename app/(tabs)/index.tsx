@@ -84,10 +84,10 @@ export default function TodayScreen() {
     setToday(jobs);
     setMe(profile);
 
-    if (jobs.shift) {
-      startShiftTracking().catch(() => undefined);
-    } else {
-      startOfficeWatch().catch(() => undefined);
+    const warning = jobs.shift ? await startShiftTracking() : await startOfficeWatch();
+
+    if (warning) {
+      setMessage(warning);
     }
   }, []);
 

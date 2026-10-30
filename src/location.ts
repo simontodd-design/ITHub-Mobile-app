@@ -20,6 +20,8 @@ type MobileConfig = {
 
 let watch: Location.LocationSubscription | null = null;
 let runningMode: TrackMode = 'off';
+let syncing = false;
+let askedForPermission = false;
 const fixListeners = new Set<(phase: string | null, officePrompt: boolean) => void>();
 
 export function subscribeShiftFix(listener: (phase: string | null, officePrompt: boolean) => void): () => void {
@@ -89,7 +91,6 @@ async function ensureUpdates(mode: 'shift' | 'office', config: MobileConfig): Pr
       : 'Location permission is needed to notice the office.';
   }
 
-  await Location.requestBackgroundPermissionsAsync();
   await AsyncStorage.setItem(MODE_KEY, mode);
 
   if (runningMode !== mode) {
@@ -97,22 +98,7 @@ async function ensureUpdates(mode: 'shift' | 'office', config: MobileConfig): Pr
   }
 
   runningMode = mode;
-  const started = await Location.hasStartedLocationUpdatesAsync(LOCATION_TASK);
-
-  if (!started) {
-    await Location.startLocationUpdatesAsync(LOCATION_TASK, {
-      accuracy: Location.Accuracy.Balanced,
-      timeInterval: config.location_interval_seconds * 1000,
-      distanceInterval: config.location_distance_metres,
-      showsBackgroundLocationIndicator: true,
-      foregroundService: {
-        notificationTitle: 'IT Hub',
-        notificationBody: mode === 'shift'
-          ? 'Location is on while you are clocked in.'
-          : 'IT Hub asks when you arrive at or leave the office.',
-      },
-    });
-  }
+  await publishCurrentFix();
 
   if (!watch) {
     watch = await Location.watchPositionAsync(
@@ -127,10 +113,53 @@ async function ensureUpdates(mode: 'shift' | 'office', config: MobileConfig): Pr
     );
   }
 
-  const current = await Location.getCurrentPositionAsync({ accuracy: Location.Accuracy.Balanced });
-  await publishFix(current);
+  // Background updates need Always. A refusal must not drop the fix already sent.
+  const background = await Location.getBackgroundPermissionsAsync();
+
+  if (background.status !== 'granted') {
+    await Location.requestBackgroundPermissionsAsync();
+  }
+
+  try {
+    const started = await Location.hasStartedLocationUpdatesAsync(LOCATION_TASK);
+
+    if (!started) {
+      await Location.startLocationUpdatesAsync(LOCATION_TASK, {
+        accuracy: Location.Accuracy.Balanced,
+        timeInterval: config.location_interval_seconds * 1000,
+        distanceInterval: config.location_distance_metres,
+        showsBackgroundLocationIndicator: true,
+        foregroundService: {
+          notificationTitle: 'IT Hub',
+          notificationBody: mode === 'shift'
+            ? 'Location is on while you are clocked in.'
+            : 'IT Hub asks when you arrive at or leave the office.',
+        },
+      });
+    }
+  } catch {
+    // The app can still send a fix while it is open.
+  }
 
   return null;
+}
+
+async function publishCurrentFix(): Promise<void> {
+  const last = await Location.getLastKnownPositionAsync();
+  const recent = last && Date.now() - last.timestamp < 15 * 60 * 1000;
+
+  if (last && recent) {
+    await publishFix(last);
+  }
+
+  const current = await Promise.race([
+    Location.getCurrentPositionAsync({ accuracy: Location.Accuracy.Balanced }),
+    new Promise<null>((resolve) => setTimeout(() => resolve(null), 8000)),
+  ]);
+
+  if (current) {
+    await publishFix(current);
+  }
 }
 
 async function haltUpdates(): Promise<void> {
@@ -167,6 +196,32 @@ export async function startOfficeWatch(): Promise<string | null> {
   }
 
   return ensureUpdates('office', config);
+}
+
+export async function syncTracking(clockedIn: boolean): Promise<string | null> {
+  const wanted: TrackMode = clockedIn ? 'shift' : 'office';
+
+  if ((runningMode === wanted && watch) || syncing) {
+    return null;
+  }
+
+  const permission = await Location.getForegroundPermissionsAsync();
+
+  if (permission.status !== 'granted' && (askedForPermission || permission.canAskAgain === false)) {
+    return clockedIn ? 'Location permission is needed while you are clocked in.' : null;
+  }
+
+  if (permission.status !== 'granted') {
+    askedForPermission = true;
+  }
+
+  syncing = true;
+
+  try {
+    return clockedIn ? await startShiftTracking() : await startOfficeWatch();
+  } finally {
+    syncing = false;
+  }
 }
 
 export async function stopShiftTracking(): Promise<void> {
