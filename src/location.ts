@@ -100,12 +100,15 @@ async function ensureUpdates(mode: 'shift' | 'office', config: MobileConfig): Pr
   runningMode = mode;
   await publishCurrentFix();
 
+  // A clocked-in phone should report even when it is sitting still.
+  const distance = mode === 'shift' ? 0 : config.location_distance_metres;
+
   if (!watch) {
     watch = await Location.watchPositionAsync(
       {
         accuracy: Location.Accuracy.Balanced,
         timeInterval: config.location_interval_seconds * 1000,
-        distanceInterval: config.location_distance_metres,
+        distanceInterval: distance,
       },
       (fix) => {
         publishFix(fix).catch(() => undefined);
@@ -127,7 +130,7 @@ async function ensureUpdates(mode: 'shift' | 'office', config: MobileConfig): Pr
       await Location.startLocationUpdatesAsync(LOCATION_TASK, {
         accuracy: Location.Accuracy.Balanced,
         timeInterval: config.location_interval_seconds * 1000,
-        distanceInterval: config.location_distance_metres,
+        distanceInterval: distance,
         showsBackgroundLocationIndicator: true,
         foregroundService: {
           notificationTitle: 'IT Hub',
