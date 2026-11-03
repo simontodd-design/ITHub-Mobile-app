@@ -3,7 +3,7 @@ import * as Location from 'expo-location';
 import { useFocusEffect, useRouter } from 'expo-router';
 import { useCallback, useState } from 'react';
 import { Linking, StyleSheet, Switch, Text, View } from 'react-native';
-import { api } from '@/api';
+import { api, appBuild, appVersion } from '@/api';
 import { hoursLabel } from '@/format';
 import { startOfficeWatch, startShiftTracking, stopShiftTracking } from '@/location';
 import { flushQueue, queueCount } from '@/offline';
@@ -155,6 +155,10 @@ export default function MeScreen() {
         </View>
       </Card>
       <Button label="Sign out" onPress={signOut} tone="ink" />
+      <Meta>
+        IT Hub {appVersion()}
+        {appBuild() ? ` (${appBuild()})` : ''}
+      </Meta>
     </Screen>
   );
 }

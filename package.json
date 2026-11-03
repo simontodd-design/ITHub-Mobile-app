@@ -1,6 +1,6 @@
 {
   "name": "ithub-mobile",
-  "version": "1.0.5",
+  "version": "1.0.6",
   "private": true,
   "description": "IT Hub engineer app — iOS and Android client for the SMS",
   "main": "expo-router/entry",
@@ -26,6 +26,7 @@
     "expo-camera": "~16.1.11",
     "expo-constants": "~17.1.8",
     "expo-dev-client": "~5.2.4",
+    "expo-device": "~7.1.4",
     "expo-file-system": "~18.1.11",
     "expo-font": "~13.3.2",
     "expo-image-picker": "~16.1.4",

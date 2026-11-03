@@ -1,10 +1,15 @@
 import Constants from 'expo-constants';
+import * as Device from 'expo-device';
 import { Platform } from 'react-native';
 import { isForcedOffline } from '@/reach';
 import { getToken } from '@/session';
 
 export function appVersion(): string {
   return Constants.nativeAppVersion || Constants.expoConfig?.version || '0';
+}
+
+export function appBuild(): string {
+  return Constants.nativeBuildVersion || '';
 }
 
 const base = (process.env.EXPO_PUBLIC_API_BASE_URL ?? 'https://portal.ithubni.com').replace(/\/$/, '');
@@ -36,6 +41,17 @@ export async function api<T>(path: string, options: Options = {}): Promise<T> {
     'X-ITHub-App-Platform': Platform.OS === 'ios' ? 'ios' : 'android',
     'X-ITHub-App-Version': appVersion(),
   };
+
+  const build = appBuild();
+  const device = Device.modelName || '';
+
+  if (build) {
+    headers['X-ITHub-App-Build'] = build;
+  }
+
+  if (device) {
+    headers['X-ITHub-App-Device'] = device;
+  }
 
   if (token) {
     headers.Authorization = `Bearer ${token}`;
