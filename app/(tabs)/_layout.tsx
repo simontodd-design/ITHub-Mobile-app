@@ -91,6 +91,7 @@ export default function TabLayout() {
       />
       <Tabs.Screen name="alerts" options={{ href: null }} />
       <Tabs.Screen name="stock" options={{ href: null }} />
+      <Tabs.Screen name="stock-take" options={{ href: null }} />
       <Tabs.Screen
         name="me"
         options={{

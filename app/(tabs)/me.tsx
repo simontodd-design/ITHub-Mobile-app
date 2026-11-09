@@ -24,6 +24,7 @@ type Me = {
   week_jobs: number;
   callout: { phase: string } | null;
   can_manage_stock?: boolean;
+  can_stock_take?: boolean;
 };
 
 export default function MeScreen() {
@@ -143,6 +144,7 @@ export default function MeScreen() {
         </Meta>
         {locationAllowed === false ? <Button label="Allow location" onPress={allowLocation} /> : null}
       </Card>
+      {me?.can_stock_take ? <Button label="Stock take" onPress={() => router.push('/stock-take')} /> : null}
       <Card>
         <View style={styles.row}>
           <View style={styles.flex}>
